@@ -25,3 +25,6 @@ I found rust's enum and pattern matching to be much cleaner than C code, where I
 
 **Update 1:**
 Version 1 is complete. The lexer turns characters into tokens, and the parser recognizes 'int main() { return n; }'. The AST stores the return statement, and code generation places the result in the system V AMD64 return value register. All the code is in the src file.
+
+**Update 2:**
+Version 2 is complete. While version 1 only had integer literals, version 2 adds unary and binary expressions. I used recursive descent, using one function per precendence level, to implement associativity and PEMDAS. For AST, I added 'Expr::Binary', 'Expr::Unary', 'BinaryOp', and 'UnaryOp'. Parser changes include 'parse_additive' loops for addition and subtraction operations, 'parse_multiplicative' loops for multiplication, division, and modulus operations, and 'parse_unary' for negativity. In this version, arithmetic operators require integer operands. In codegen, the changes include generating left and right operands, using stack temporaries, and emitting 'add', 'sub', 'imul', 'idiv', or remainder from 'rdx'.

@@ -8,7 +8,7 @@ fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
 
     let source = match args.next() {
-        // Read the program from a file path...
+        // Read the program from a file path
         Some(path) => match std::fs::read_to_string(&path) {
             Ok(contents) => contents,
             Err(err) => {
@@ -16,7 +16,7 @@ fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             }
         },
-        // ...or fall back to a tiny built-in sample so `cargo run` just works.
+        // if there's nothing, it will fall back to a sample so `cargo run` works regardless
         None => {
             eprintln!("usage: ecc <source.c>   (no file given, compiling a sample)");
             "int main() { return 1 + 2 * 3; }".to_string()
