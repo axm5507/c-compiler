@@ -1,3 +1,5 @@
+use crate::ast::{BinaryOp, Expr, Program, Stmt, UnaryOp};
+
 pub fn generate(program: &Program) -> String {
     let mut asm = String::new();
     asm.push_str(".intel_syntax noprefix\n");
