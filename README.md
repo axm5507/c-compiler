@@ -21,6 +21,7 @@ I've been becoming more and more interested in computer architecture lately, and
 **Why Rust?**
 I found rust's enum and pattern matching to be much cleaner than C code, where I'd have to use unions and manual type tags. It also has a strict memory model that makes sure a bunch of different types of bugs will be blocked at compile time. There are some tradeoffs, like less low level control and pretty complex data structures, but I also wanted to grow my knowledge in rust.
 
-#Updates
+# Updates
+
 **Update 1:**
 Version 1 is complete. The lexer turns characters into tokens, and the parser recognizes 'int main() { return n; }'. The AST stores the return statement, and code generation places the result in the system V AMD64 return value register. All the code is in the src file.
