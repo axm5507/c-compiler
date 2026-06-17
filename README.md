@@ -13,11 +13,13 @@ Right now, I plan on implementing the following 7 versions:
 6. Pointers, address of, dereferencing
 7. Arrays, indexing, structs, alignment, layout
 
-**A few questions I thought of while starting:**
+# **A few questions I thought of while starting:**
 
-Why this project?
+**Why this project?**
 I've been becoming more and more interested in computer architecture lately, and making a simple compiler seemed like a good idea to help understand how everything works under the hood. It will force me to learn things like instruction sets, registers, and memory layout, and is directly connected to CPU architecture.
 
-Why Rust?
+**Why Rust?**
 I found rust's enum and pattern matching to be much cleaner than C code, where I'd have to use unions and manual type tags. It also has a strict memory model that makes sure a bunch of different types of bugs will be blocked at compile time. There are some tradeoffs, like less low level control and pretty complex data structures, but I also wanted to grow my knowledge in rust.
 
+**Update 1:**
+Version 1 is complete. All the code is in the src file.
