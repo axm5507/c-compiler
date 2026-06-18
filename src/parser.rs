@@ -1,4 +1,4 @@
-use crate::ast::{BinaryOp, Expr, Function, Program, Stmt, UnaryOp};
+use crate::ast::{BinaryOp, Expr, Function, Program, Stmt, UnaryOp, VarDecl};
 use crate::lexer::{Token, TokenKind};
 
 pub struct Parser{
@@ -20,28 +20,77 @@ impl Parser {
         self.expect(TokenKind::RParen)?;
 
         self.expect(TokenKind::LBrace)?;
-        self.expect(TokenKind::ReturnKw)?;
-        
-        //let value = self.expect_number()?;
-        //replacing this for version 2
-        let expr = self.parse_expr()?;
 
-        self.expect(TokenKind::Semi)?;
+        //version 3: parse a sequence of statements until the closing brace, instead of
+        //assuming the body is exactly one return statement
+        let mut body = Vec::new();
+        while !self.at(TokenKind::RBrace) {
+            body.push(self.parse_stmt()?);
+        }
+
         self.expect(TokenKind::RBrace)?;
         self.expect(TokenKind::Eof)?;
 
         Ok(Program {
-            function: Function {
-                name,
-                //body: Stmt::Return(Expr::Int(value)),
-                //I'm also replacing this for version 2
-                body: Stmt::Return(expr),
-            },
+            function: Function { name, body },
         })
     }
+
+    //version 3: decide which kind of statement we're looking at and parse it
+    fn parse_stmt(&mut self) -> Result<Stmt, String> {
+        if self.at(TokenKind::IntKw) {
+            return self.parse_decl();
+        }
+
+        // return <expr>;
+        if self.consume(TokenKind::ReturnKw) {
+            let expr = self.parse_expr()?;
+            self.expect(TokenKind::Semi)?;
+            return Ok(Stmt::Return(expr));
+        }
+
+        // otherwise it's an expression statement
+        let expr = self.parse_expr()?;
+        self.expect(TokenKind::Semi)?;
+        Ok(Stmt::Expr(expr))
+    }
+
+    //version 3: parsing a local variable declaration
+    fn parse_decl(&mut self) -> Result<Stmt, String> {
+        self.expect(TokenKind::IntKw)?;
+        let name = self.expect_ident()?;
+
+        let init = if self.consume(TokenKind::Assign) {
+            Some(self.parse_expr()?)
+        } else {
+            None
+        };
+
+        self.expect(TokenKind::Semi)?;
+        Ok(Stmt::Decl(VarDecl { name, init }))
+    }
+
     //now adding the parsing of different mathematical stuff for version 2
     fn parse_expr(&mut self) -> Result<Expr, String>{
-        self.parse_additive()
+        //version 3: assignment sits at the bottom (lowest precedence) of the expression grammar
+        self.parse_assign()
+    }
+
+    //version 3: assignment is lower precedence than math stuff
+    //we first parse an ordinary expression; if it's followed by equal sign,
+    //the thing we just parsed must be a plain variable name
+    fn parse_assign(&mut self) -> Result<Expr, String>{
+        let expr = self.parse_additive()?;
+
+        if self.consume(TokenKind::Assign) {
+            let value = self.parse_assign()?;
+            if let Expr::Var(name) = expr {
+                return Ok(Expr::Assign(name, Box::new(value)));
+            }
+            return Err(self.error_here("invalid assignment target (left side must be a variable)"));
+        }
+
+        Ok(expr)
     }
     // this is for addition and subtraction
     fn parse_additive(&mut self) -> Result<Expr, String>{
@@ -118,6 +167,10 @@ impl Parser {
         }
         if self.at(TokenKind::Number){
             return Ok(Expr::Int(self.expect_number()?));
+        }
+        //version 3: a bare identifier is a variable read, e.g. `x`
+        if self.at(TokenKind::Ident){
+            return Ok(Expr::Var(self.expect_ident()?));
         }
         Err(self.error_here("expected expression"))
     }

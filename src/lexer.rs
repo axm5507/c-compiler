@@ -23,6 +23,8 @@ pub enum TokenKind{
     Star,
     Slash,
     Percent,
+    //version 3: just adding `=`
+    Assign,
 }
 
 //version 2 additions
@@ -117,6 +119,7 @@ impl<'a> Lexer<'a> {
             '*' => TokenKind::Star,
             '/' => TokenKind::Slash,
             '%' => TokenKind::Percent,
+            '=' => TokenKind::Assign,
 
             '(' => TokenKind::LParen,
             ')' => TokenKind::RParen,

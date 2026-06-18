@@ -3,6 +3,7 @@ use std::process::ExitCode;
 use educational_c_compiler::codegen;
 use educational_c_compiler::lexer::Lexer;
 use educational_c_compiler::parser::Parser;
+use educational_c_compiler::sema;
 
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
@@ -38,5 +39,7 @@ fn main() -> ExitCode {
 fn compile(source: &str) -> Result<String, String> {
     let tokens = Lexer::new(source).tokenize()?;
     let program = Parser::new(tokens).parse_program()?;
-    Ok(codegen::generate(&program))
+    // version 3: validate the program and lay out locals before generating code
+    let symbols = sema::analyze(&program)?;
+    Ok(codegen::generate(&program, &symbols))
 }
