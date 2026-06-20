@@ -1,4 +1,4 @@
-use crate::ast::{BinaryOp, Expr, Function, Program, Stmt, UnaryOp, VarDecl};
+use crate::ast::{BinaryOp, Expr, Function, LogicalOp, Program, Stmt, UnaryOp, VarDecl};
 use crate::lexer::{Token, TokenKind};
 
 pub struct Parser{
@@ -42,6 +42,21 @@ impl Parser {
             return self.parse_decl();
         }
 
+        //version 4: control-flow statements get their own dedicated parsers
+        if self.at(TokenKind::IfKw) {
+            return self.parse_if();
+        }
+        if self.at(TokenKind::WhileKw) {
+            return self.parse_while();
+        }
+        if self.at(TokenKind::ForKw) {
+            return self.parse_for();
+        }
+        //version 4: a `{ ... }` block nested inside the function body
+        if self.at(TokenKind::LBrace) {
+            return self.parse_block();
+        }
+
         // return <expr>;
         if self.consume(TokenKind::ReturnKw) {
             let expr = self.parse_expr()?;
@@ -53,6 +68,92 @@ impl Parser {
         let expr = self.parse_expr()?;
         self.expect(TokenKind::Semi)?;
         Ok(Stmt::Expr(expr))
+    }
+
+    //version 4: parse statements until the matching closing brace
+    fn parse_block(&mut self) -> Result<Stmt, String> {
+        self.expect(TokenKind::LBrace)?;
+        let mut stmts = Vec::new();
+        while !self.at(TokenKind::RBrace) {
+            stmts.push(self.parse_stmt()?);
+        }
+        self.expect(TokenKind::RBrace)?;
+        Ok(Stmt::Block(stmts))
+    }
+
+    //version 4: the `else` binds to the nearest `if`
+    //automatically because each branch is just one parsed statement
+    fn parse_if(&mut self) -> Result<Stmt, String> {
+        self.expect(TokenKind::IfKw)?;
+        self.expect(TokenKind::LParen)?;
+        let cond = self.parse_expr()?;
+        self.expect(TokenKind::RParen)?;
+
+        let then_branch = Box::new(self.parse_stmt()?);
+
+        let else_branch = if self.consume(TokenKind::ElseKw) {
+            Some(Box::new(self.parse_stmt()?))
+        } else {
+            None
+        };
+
+        Ok(Stmt::If {
+            cond,
+            then_branch,
+            else_branch,
+        })
+    }
+
+    //version 4: `while (cond) stmt`
+    fn parse_while(&mut self) -> Result<Stmt, String> {
+        self.expect(TokenKind::WhileKw)?;
+        self.expect(TokenKind::LParen)?;
+        let cond = self.parse_expr()?;
+        self.expect(TokenKind::RParen)?;
+        let body = Box::new(self.parse_stmt()?);
+        Ok(Stmt::While { cond, body })
+    }
+
+    //version 4: for loop parsing
+    fn parse_for(&mut self) -> Result<Stmt, String> {
+        self.expect(TokenKind::ForKw)?;
+        self.expect(TokenKind::LParen)?;
+
+        // init clause: either a declaration, an expression, or nothing
+        let init = if self.at(TokenKind::Semi) {
+            self.expect(TokenKind::Semi)?;
+            None
+        } else if self.at(TokenKind::IntKw) {
+            Some(Box::new(self.parse_decl()?))
+        } else {
+            let expr = self.parse_expr()?;
+            self.expect(TokenKind::Semi)?;
+            Some(Box::new(Stmt::Expr(expr)))
+        };
+
+        // condition clause: optional expression, then `;`
+        let cond = if self.at(TokenKind::Semi) {
+            None
+        } else {
+            Some(self.parse_expr()?)
+        };
+        self.expect(TokenKind::Semi)?;
+
+        // step clause: optional expression, then the closing `)`
+        let step = if self.at(TokenKind::RParen) {
+            None
+        } else {
+            Some(self.parse_expr()?)
+        };
+        self.expect(TokenKind::RParen)?;
+
+        let body = Box::new(self.parse_stmt()?);
+        Ok(Stmt::For {
+            init,
+            cond,
+            step,
+            body,
+        })
     }
 
     //version 3: parsing a local variable declaration
@@ -80,7 +181,8 @@ impl Parser {
     //we first parse an ordinary expression; if it's followed by equal sign,
     //the thing we just parsed must be a plain variable name
     fn parse_assign(&mut self) -> Result<Expr, String>{
-        let expr = self.parse_additive()?;
+        //version 4: below assignment sits the whole comparison/logical ladder.
+        let expr = self.parse_logical_or()?;
 
         if self.consume(TokenKind::Assign) {
             let value = self.parse_assign()?;
@@ -90,6 +192,69 @@ impl Parser {
             return Err(self.error_here("invalid assignment target (left side must be a variable)"));
         }
 
+        Ok(expr)
+    }
+
+    //version 4: precedence ladder, lowest binding first. each level parses the
+    //next-tighter level and then loops while it sees an operator at its own level,
+    //so operators of equal precedence group left to right
+    //
+    //   `||`  <  `&&`  <  `== !=`  <  `< <= > >=`  <  `+ -`  <  `* / %`  <  unary
+    fn parse_logical_or(&mut self) -> Result<Expr, String>{
+        let mut expr = self.parse_logical_and()?;
+        while self.consume(TokenKind::OrOr) {
+            expr = Expr::Logical(
+                LogicalOp::Or,
+                Box::new(expr),
+                Box::new(self.parse_logical_and()?),
+            );
+        }
+        Ok(expr)
+    }
+
+    fn parse_logical_and(&mut self) -> Result<Expr, String>{
+        let mut expr = self.parse_equality()?;
+        while self.consume(TokenKind::AndAnd) {
+            expr = Expr::Logical(
+                LogicalOp::And,
+                Box::new(expr),
+                Box::new(self.parse_equality()?),
+            );
+        }
+        Ok(expr)
+    }
+
+    fn parse_equality(&mut self) -> Result<Expr, String>{
+        let mut expr = self.parse_relational()?;
+        loop {
+            let op = if self.consume(TokenKind::EqEq) {
+                BinaryOp::Eq
+            } else if self.consume(TokenKind::Ne) {
+                BinaryOp::Ne
+            } else {
+                break;
+            };
+            expr = Expr::Binary(op, Box::new(expr), Box::new(self.parse_relational()?));
+        }
+        Ok(expr)
+    }
+
+    fn parse_relational(&mut self) -> Result<Expr, String>{
+        let mut expr = self.parse_additive()?;
+        loop {
+            let op = if self.consume(TokenKind::Lt) {
+                BinaryOp::Lt
+            } else if self.consume(TokenKind::Le) {
+                BinaryOp::Le
+            } else if self.consume(TokenKind::Gt) {
+                BinaryOp::Gt
+            } else if self.consume(TokenKind::Ge) {
+                BinaryOp::Ge
+            } else {
+                break;
+            };
+            expr = Expr::Binary(op, Box::new(expr), Box::new(self.parse_additive()?));
+        }
         Ok(expr)
     }
     // this is for addition and subtraction

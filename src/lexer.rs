@@ -25,6 +25,21 @@ pub enum TokenKind{
     Percent,
     //version 3: just adding `=`
     Assign,
+    //version 4: control flow keywords
+    IfKw,
+    ElseKw,
+    WhileKw,
+    ForKw,
+    //version 4: comparison operators
+    EqEq, // ==
+    Ne,   // !=
+    Lt,   // <
+    Le,   // <=
+    Gt,   // >
+    Ge,   // >=
+    //version 4: short circuiting logical operators
+    AndAnd, // &&
+    OrOr,   // ||
 }
 
 //version 2 additions
@@ -49,6 +64,18 @@ impl<'a> Lexer<'a> {
             match ch {
                 c if c.is_whitespace() => {
                     self.bump();
+                }
+
+                //version 4: skip `//` line comments so example files can be
+                //commented on. this code looks ahead to distinguish `//` from a lone
+                //`/` (division)
+                '/' if self.chars.get(self.pos + 1) == Some(&'/') => {
+                    while let Some(c) = self.peek() {
+                        if c == '\n' {
+                            break;
+                        }
+                        self.bump();
+                    }
                 }
 
                 c if c.is_ascii_digit() => {
@@ -100,6 +127,11 @@ impl<'a> Lexer<'a> {
         let kind = match lexeme.as_str() {
             "int" => TokenKind::IntKw,
             "return" => TokenKind::ReturnKw,
+            //version 4: control flow keywords
+            "if" => TokenKind::IfKw,
+            "else" => TokenKind::ElseKw,
+            "while" => TokenKind::WhileKw,
+            "for" => TokenKind::ForKw,
             _ => TokenKind::Ident,
         };
 
@@ -119,7 +151,42 @@ impl<'a> Lexer<'a> {
             '*' => TokenKind::Star,
             '/' => TokenKind::Slash,
             '%' => TokenKind::Percent,
+
+            //version 4: some operators are two characters long. after bump() the
+            //cursor sits on the second character, so we peek and if it forms a
+            //two char operator, bump() again to consume it
+            '=' if self.peek() == Some('=') => {
+                self.bump();
+                TokenKind::EqEq
+            }
             '=' => TokenKind::Assign,
+
+            '!' if self.peek() == Some('=') => {
+                self.bump();
+                TokenKind::Ne
+            }
+
+            '<' if self.peek() == Some('=') => {
+                self.bump();
+                TokenKind::Le
+            }
+            '<' => TokenKind::Lt,
+
+            '>' if self.peek() == Some('=') => {
+                self.bump();
+                TokenKind::Ge
+            }
+            '>' => TokenKind::Gt,
+
+            // `&` and `|` will only ever appear doubled 
+            '&' if self.peek() == Some('&') => {
+                self.bump();
+                TokenKind::AndAnd
+            }
+            '|' if self.peek() == Some('|') => {
+                self.bump();
+                TokenKind::OrOr
+            }
 
             '(' => TokenKind::LParen,
             ')' => TokenKind::RParen,

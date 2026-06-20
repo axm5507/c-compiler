@@ -1,5 +1,13 @@
-use crate::ast::{BinaryOp, Expr, Program, Stmt, UnaryOp};
+use crate::ast::{BinaryOp, Expr, LogicalOp, Program, Stmt, UnaryOp};
 use crate::sema::SymbolTable;
+
+//version 4: control flow needs unique jump targets. each call hands back a fresh
+//integer that I formatted as `.L<n>` so labels never collide 
+fn next_label(labels: &mut usize) -> usize {
+    let id = *labels;
+    *labels += 1;
+    id
+}
 
 pub fn generate(program: &Program, symbols: &SymbolTable) -> String {
     let mut asm = String::new();
@@ -18,8 +26,11 @@ pub fn generate(program: &Program, symbols: &SymbolTable) -> String {
     }
 
     //version 3: the body is now a list of statements rather than a single return
+    //version 4: thread a label counter through codegen so control flow can mint
+    //unique jump targets
+    let mut labels = 0usize;
     for stmt in &program.function.body {
-        gen_stmt(&mut asm, stmt, symbols);
+        gen_stmt(&mut asm, stmt, symbols, &mut labels);
     }
 
 
@@ -32,40 +43,146 @@ pub fn generate(program: &Program, symbols: &SymbolTable) -> String {
 }
 
 //version 3: emit assembly for a single statement
-fn gen_stmt(asm: &mut String, stmt: &Stmt, symbols: &SymbolTable) {
+fn gen_stmt(asm: &mut String, stmt: &Stmt, symbols: &SymbolTable, labels: &mut usize) {
     match stmt {
         Stmt::Return(expr) => {
-            gen_expr(asm, expr, symbols);
+            gen_expr(asm, expr, symbols, labels);
             asm.push_str("  jmp .Lreturn\n");
         }
 
         // a bare expression statement, evaluate it for its side
         // effect and throw away the result left in rax
         Stmt::Expr(expr) => {
-            gen_expr(asm, expr, symbols);
+            gen_expr(asm, expr, symbols, labels);
         }
 
         // evaluate the initializer (defaulting to 0) into rax, then
         // store it into the variable's stack slot
         Stmt::Decl(decl) => {
             match &decl.init {
-                Some(init) => gen_expr(asm, init, symbols),
+                Some(init) => gen_expr(asm, init, symbols, labels),
                 None => asm.push_str("  mov rax, 0\n"),
             }
             let offset = symbols.offsets[&decl.name];
             asm.push_str(&format!("  mov [rbp-{offset}], rax\n"));
         }
+
+        //version 4: a block just emits its statements in order
+        Stmt::Block(stmts) => {
+            for s in stmts {
+                gen_stmt(asm, s, symbols, labels);
+            }
+        }
+
+        //version 4: if/else lowers to a conditional jump over the `then` branch.
+        //   <cond>            ; result in rax
+        //   cmp rax, 0
+        //   je  .Lelse        ; false -> skip the then-branch
+        //   <then>
+        //   jmp .Lend
+        //  .Lelse:
+        //   <else>
+        //  .Lend:
+        // when there's no else, we jump straight to .Lend on a false condition.
+        Stmt::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            let else_label = next_label(labels);
+            let end_label = next_label(labels);
+
+            gen_expr(asm, cond, symbols, labels);
+            asm.push_str("  cmp rax, 0\n");
+
+            match else_branch {
+                Some(else_branch) => {
+                    asm.push_str(&format!("  je .L{else_label}\n"));
+                    gen_stmt(asm, then_branch, symbols, labels);
+                    asm.push_str(&format!("  jmp .L{end_label}\n"));
+                    asm.push_str(&format!(".L{else_label}:\n"));
+                    gen_stmt(asm, else_branch, symbols, labels);
+                    asm.push_str(&format!(".L{end_label}:\n"));
+                }
+                None => {
+                    asm.push_str(&format!("  je .L{end_label}\n"));
+                    gen_stmt(asm, then_branch, symbols, labels);
+                    asm.push_str(&format!(".L{end_label}:\n"));
+                }
+            }
+        }
+
+        //version 4: while loops re-test the condition at the top and use a back
+        //edge (`jmp .Lstart`) to repeat.
+        //  .Lstart:
+        //   <cond>
+        //   cmp rax, 0
+        //   je  .Lend         ; exit when the condition is false
+        //   <body>
+        //   jmp .Lstart       ; back edge
+        //  .Lend:
+        Stmt::While { cond, body } => {
+            let start_label = next_label(labels);
+            let end_label = next_label(labels);
+
+            asm.push_str(&format!(".L{start_label}:\n"));
+            gen_expr(asm, cond, symbols, labels);
+            asm.push_str("  cmp rax, 0\n");
+            asm.push_str(&format!("  je .L{end_label}\n"));
+            gen_stmt(asm, body, symbols, labels);
+            asm.push_str(&format!("  jmp .L{start_label}\n"));
+            asm.push_str(&format!(".L{end_label}:\n"));
+        }
+
+        //version 4: a for loop is a while loop with an init before it and a step
+        //appended to the bottom of the body.
+        //   <init>
+        //  .Lstart:
+        //   <cond>            ; omitted clause => no test, loops forever
+        //   cmp rax, 0
+        //   je  .Lend
+        //   <body>
+        //   <step>
+        //   jmp .Lstart
+        //  .Lend:
+        Stmt::For {
+            init,
+            cond,
+            step,
+            body,
+        } => {
+            let start_label = next_label(labels);
+            let end_label = next_label(labels);
+
+            if let Some(init) = init {
+                gen_stmt(asm, init, symbols, labels);
+            }
+
+            asm.push_str(&format!(".L{start_label}:\n"));
+            // an absent condition means "always true": skip the test entirely.
+            if let Some(cond) = cond {
+                gen_expr(asm, cond, symbols, labels);
+                asm.push_str("  cmp rax, 0\n");
+                asm.push_str(&format!("  je .L{end_label}\n"));
+            }
+            gen_stmt(asm, body, symbols, labels);
+            if let Some(step) = step {
+                gen_expr(asm, step, symbols, labels);
+            }
+            asm.push_str(&format!("  jmp .L{start_label}\n"));
+            asm.push_str(&format!(".L{end_label}:\n"));
+        }
     }
 }
 
 //new function that recursively emits assembly for expression trees built by parser
-fn gen_expr(asm: &mut String, expr: &Expr, symbols: &SymbolTable) {
+fn gen_expr(asm: &mut String, expr: &Expr, symbols: &SymbolTable, labels: &mut usize) {
     match expr {
         Expr::Int(value) => {
             asm.push_str(&format!("  mov rax, {value}\n"));
         }
 
-        //version 3: read a variable by taking the address of its slot and loading through it 
+        //version 3: read a variable by taking the address of its slot and loading through it
         Expr::Var(name) => {
             let offset = symbols.offsets[name];
             asm.push_str(&format!("  lea rax, [rbp-{offset}]\n"));
@@ -74,22 +191,23 @@ fn gen_expr(asm: &mut String, expr: &Expr, symbols: &SymbolTable) {
 
         //version 3: evaluate the right hand side into rax, then store it into the variable's slot
         Expr::Assign(name, value) => {
-            gen_expr(asm, value, symbols);
+            gen_expr(asm, value, symbols, labels);
             let offset = symbols.offsets[name];
             asm.push_str(&format!("  mov [rbp-{offset}], rax\n"));
         }
 
         Expr::Unary(UnaryOp::Neg, inner) => {
-            gen_expr(asm, inner, symbols);
+            gen_expr(asm, inner, symbols, labels);
             asm.push_str("  neg rax\n");
         }
 
         Expr::Binary(op, lhs, rhs) => {
-            gen_expr(asm, lhs, symbols);
+            gen_expr(asm, lhs, symbols, labels);
             asm.push_str("  push rax\n");
 
-            gen_expr(asm, rhs, symbols);
+            gen_expr(asm, rhs, symbols, labels);
             asm.push_str("  pop rdi\n");
+            // after this: rdi = left operand, rax = right operand
 
             match op {
                 BinaryOp::Add => {
@@ -114,6 +232,65 @@ fn gen_expr(asm: &mut String, expr: &Expr, symbols: &SymbolTable) {
                     if matches!(op, BinaryOp::Mod) {
                         asm.push_str("  mov rax, rdx\n");
                     }
+                }
+
+                //version 4: comparisons. we compare left(rdi) against right(rax),
+                //then materialize the boolean flag as an integer 0/1 in rax
+                BinaryOp::Eq
+                | BinaryOp::Ne
+                | BinaryOp::Lt
+                | BinaryOp::Le
+                | BinaryOp::Gt
+                | BinaryOp::Ge => {
+                    let setcc = match op {
+                        BinaryOp::Eq => "sete",
+                        BinaryOp::Ne => "setne",
+                        BinaryOp::Lt => "setl",
+                        BinaryOp::Le => "setle",
+                        BinaryOp::Gt => "setg",
+                        BinaryOp::Ge => "setge",
+                        _ => unreachable!(),
+                    };
+                    asm.push_str("  cmp rdi, rax\n");
+                    asm.push_str(&format!("  {setcc} al\n"));
+                    asm.push_str("  movzx rax, al\n");
+                }
+            }
+        }
+
+        //version 4: short-circuiting `&&` / `||`
+        Expr::Logical(op, lhs, rhs) => {
+            let short_label = next_label(labels); // where we jump when the result is known early
+            let end_label = next_label(labels);
+
+            match op {
+                LogicalOp::And => {
+                    gen_expr(asm, lhs, symbols, labels);
+                    asm.push_str("  cmp rax, 0\n");
+                    asm.push_str(&format!("  je .L{short_label}\n"));
+                    gen_expr(asm, rhs, symbols, labels);
+                    asm.push_str("  cmp rax, 0\n");
+                    asm.push_str(&format!("  je .L{short_label}\n"));
+                    // both sides truthy -> 1
+                    asm.push_str("  mov rax, 1\n");
+                    asm.push_str(&format!("  jmp .L{end_label}\n"));
+                    asm.push_str(&format!(".L{short_label}:\n"));
+                    asm.push_str("  mov rax, 0\n");
+                    asm.push_str(&format!(".L{end_label}:\n"));
+                }
+
+                LogicalOp::Or => {
+                    gen_expr(asm, lhs, symbols, labels);
+                    asm.push_str("  cmp rax, 0\n");
+                    asm.push_str(&format!("  jne .L{short_label}\n"));
+                    gen_expr(asm, rhs, symbols, labels);
+                    asm.push_str("  cmp rax, 0\n");
+                    asm.push_str(&format!("  jne .L{short_label}\n"));
+                    asm.push_str("  mov rax, 0\n");
+                    asm.push_str(&format!("  jmp .L{end_label}\n"));
+                    asm.push_str(&format!(".L{short_label}:\n"));
+                    asm.push_str("  mov rax, 1\n");
+                    asm.push_str(&format!(".L{end_label}:\n"));
                 }
             }
         }

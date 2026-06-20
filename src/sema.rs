@@ -10,7 +10,6 @@ use std::collections::HashMap;
 
 use crate::ast::{Expr, Program, Stmt};
 
-// The result of analysis: where each variable lives and how much stack we need.
 pub struct SymbolTable {
     pub offsets: HashMap<String, i64>,
     // total stack bytes to reserve for locals, rounded up to a 16-byte boundary
@@ -69,6 +68,49 @@ impl Analyzer {
                 }
                 self.declare(&decl.name)
             }
+
+            //version 4: a condition is just an expression (C has no separate bool
+            //type, any int is truthy if not 0), so we validate it like any other
+            //expression and then recurse into the nested statements.
+            Stmt::Block(stmts) => {
+                for s in stmts {
+                    self.check_stmt(s)?;
+                }
+                Ok(())
+            }
+            Stmt::If {
+                cond,
+                then_branch,
+                else_branch,
+            } => {
+                self.check_expr(cond)?;
+                self.check_stmt(then_branch)?;
+                if let Some(else_branch) = else_branch {
+                    self.check_stmt(else_branch)?;
+                }
+                Ok(())
+            }
+            Stmt::While { cond, body } => {
+                self.check_expr(cond)?;
+                self.check_stmt(body)
+            }
+            Stmt::For {
+                init,
+                cond,
+                step,
+                body,
+            } => {
+                if let Some(init) = init {
+                    self.check_stmt(init)?;
+                }
+                if let Some(cond) = cond {
+                    self.check_expr(cond)?;
+                }
+                if let Some(step) = step {
+                    self.check_expr(step)?;
+                }
+                self.check_stmt(body)
+            }
         }
     }
 
@@ -86,6 +128,11 @@ impl Analyzer {
                 self.check_expr(rhs)
             }
             Expr::Unary(_, inner) => self.check_expr(inner),
+            //version 4: a logical operator just needs both operands to be valid 
+            Expr::Logical(_, lhs, rhs) => {
+                self.check_expr(lhs)?;
+                self.check_expr(rhs)
+            }
         }
     }
 }
