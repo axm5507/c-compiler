@@ -1,20 +1,53 @@
-use crate::ast::{BinaryOp, Expr, LogicalOp, Program, Stmt, UnaryOp};
-use crate::sema::SymbolTable;
+use crate::ast::{BinaryOp, Expr, Function, LogicalOp, Program, Stmt, UnaryOp};
+use crate::sema::{ProgramLayout, SymbolTable};
+
+//version 5: the System V AMD64 calling convention passes the first six integer/
+//pointer arguments in these registers, in this order
+//Return values come back in rax, sema guarantees we never exceed six
+const ARG_REGS: [&str; 6] = ["rdi", "rsi", "rdx", "rcx", "r8", "r9"];
 
 //version 4: control flow needs unique jump targets. each call hands back a fresh
-//integer that I formatted as `.L<n>` so labels never collide 
+//integer that I formatted as `.L<n>` so labels never collide
 fn next_label(labels: &mut usize) -> usize {
     let id = *labels;
     *labels += 1;
     id
 }
 
-pub fn generate(program: &Program, symbols: &SymbolTable) -> String {
+//version 5: push/pop helpers that also track how many 8-byte values are currently
+//on the stack. After the prologue rsp is 16-byte aligned, so rsp is aligned exactly
+// when depth is even
+fn push(asm: &mut String, depth: &mut i64) {
+    asm.push_str("  push rax\n");
+    *depth += 1;
+}
+
+fn pop(asm: &mut String, depth: &mut i64, reg: &str) {
+    asm.push_str(&format!("  pop {reg}\n"));
+    *depth -= 1;
+}
+
+pub fn generate(program: &Program, layout: &ProgramLayout) -> String {
     let mut asm = String::new();
     asm.push_str(".intel_syntax noprefix\n");
     asm.push_str(".text\n");
-    asm.push_str(&format!(".globl {}\n", program.function.name));
-    asm.push_str(&format!("{}:\n", program.function.name));
+
+    //version 5: emit each function in turn
+    let mut labels = 0usize;
+    for func in &program.functions {
+        let symbols = &layout.functions[&func.name];
+        gen_function(&mut asm, func, symbols, &mut labels);
+    }
+
+    asm
+}
+
+//version 5: emit one complete function
+fn gen_function(asm: &mut String, func: &Function, symbols: &SymbolTable, labels: &mut usize) {
+    asm.push_str(&format!(".globl {}\n", func.name));
+    asm.push_str(&format!("{}:\n", func.name));
+
+    // prologue: save the caller's frame pointer, set up ours
     asm.push_str("  push rbp\n");
     asm.push_str("  mov rbp, rsp\n");
 
@@ -25,42 +58,54 @@ pub fn generate(program: &Program, symbols: &SymbolTable) -> String {
         asm.push_str(&format!("  sub rsp, {}\n", symbols.stack_size));
     }
 
-    //version 3: the body is now a list of statements rather than a single return
-    //version 4: thread a label counter through codegen so control flow can mint
-    //unique jump targets
-    let mut labels = 0usize;
-    for stmt in &program.function.body {
-        gen_stmt(&mut asm, stmt, symbols, &mut labels);
+    //version 5: copy each incoming argument register into the slot sema assigned to that parameter
+    for (i, param) in func.params.iter().enumerate() {
+        let offset = symbols.offsets[param];
+        asm.push_str(&format!("  mov [rbp-{offset}], {}\n", ARG_REGS[i]));
     }
 
+    //version 5: each function needs its own return label, otherwise two functions
+    //would both define `.Lreturn` and the assembler would reject the duplicate
+    let ret_label = format!(".Lreturn_{}", func.name);
+    let mut depth = 0i64;
 
-    asm.push_str(".Lreturn:\n");//version 3 : one return point at the end of the function, all returns jump to it after leaving their value in rax
+    for stmt in &func.body {
+        gen_stmt(asm, stmt, symbols, labels, &mut depth, &ret_label);
+    }
+
+    // epilogue: every `return` jumps here after leaving its value in rax, we also
+    // fall through to here if execution runs off the end of the body
+    asm.push_str(&format!("{ret_label}:\n"));
     asm.push_str("  mov rsp, rbp\n");
     asm.push_str("  pop rbp\n");
     asm.push_str("  ret\n");
-
-    asm
 }
 
 //version 3: emit assembly for a single statement
-fn gen_stmt(asm: &mut String, stmt: &Stmt, symbols: &SymbolTable, labels: &mut usize) {
+fn gen_stmt(
+    asm: &mut String,
+    stmt: &Stmt,
+    symbols: &SymbolTable,
+    labels: &mut usize,
+    depth: &mut i64,
+    ret_label: &str,
+) {
     match stmt {
         Stmt::Return(expr) => {
-            gen_expr(asm, expr, symbols, labels);
-            asm.push_str("  jmp .Lreturn\n");
+            gen_expr(asm, expr, symbols, labels, depth);
+            asm.push_str(&format!("  jmp {ret_label}\n"));
         }
 
-        // a bare expression statement, evaluate it for its side
-        // effect and throw away the result left in rax
+
         Stmt::Expr(expr) => {
-            gen_expr(asm, expr, symbols, labels);
+            gen_expr(asm, expr, symbols, labels, depth);
         }
 
         // evaluate the initializer (defaulting to 0) into rax, then
         // store it into the variable's stack slot
         Stmt::Decl(decl) => {
             match &decl.init {
-                Some(init) => gen_expr(asm, init, symbols, labels),
+                Some(init) => gen_expr(asm, init, symbols, labels, depth),
                 None => asm.push_str("  mov rax, 0\n"),
             }
             let offset = symbols.offsets[&decl.name];
@@ -70,11 +115,11 @@ fn gen_stmt(asm: &mut String, stmt: &Stmt, symbols: &SymbolTable, labels: &mut u
         //version 4: a block just emits its statements in order
         Stmt::Block(stmts) => {
             for s in stmts {
-                gen_stmt(asm, s, symbols, labels);
+                gen_stmt(asm, s, symbols, labels, depth, ret_label);
             }
         }
 
-        //version 4: if/else lowers to a conditional jump over the `then` branch.
+        //version 4: if/else lowers to a conditional jump over the `then` branch
         //   <cond>            ; result in rax
         //   cmp rax, 0
         //   je  .Lelse        ; false -> skip the then-branch
@@ -83,7 +128,7 @@ fn gen_stmt(asm: &mut String, stmt: &Stmt, symbols: &SymbolTable, labels: &mut u
         //  .Lelse:
         //   <else>
         //  .Lend:
-        // when there's no else, we jump straight to .Lend on a false condition.
+        // when there's no else, we jump straight to .Lend on a false condition
         Stmt::If {
             cond,
             then_branch,
@@ -92,28 +137,28 @@ fn gen_stmt(asm: &mut String, stmt: &Stmt, symbols: &SymbolTable, labels: &mut u
             let else_label = next_label(labels);
             let end_label = next_label(labels);
 
-            gen_expr(asm, cond, symbols, labels);
+            gen_expr(asm, cond, symbols, labels, depth);
             asm.push_str("  cmp rax, 0\n");
 
             match else_branch {
                 Some(else_branch) => {
                     asm.push_str(&format!("  je .L{else_label}\n"));
-                    gen_stmt(asm, then_branch, symbols, labels);
+                    gen_stmt(asm, then_branch, symbols, labels, depth, ret_label);
                     asm.push_str(&format!("  jmp .L{end_label}\n"));
                     asm.push_str(&format!(".L{else_label}:\n"));
-                    gen_stmt(asm, else_branch, symbols, labels);
+                    gen_stmt(asm, else_branch, symbols, labels, depth, ret_label);
                     asm.push_str(&format!(".L{end_label}:\n"));
                 }
                 None => {
                     asm.push_str(&format!("  je .L{end_label}\n"));
-                    gen_stmt(asm, then_branch, symbols, labels);
+                    gen_stmt(asm, then_branch, symbols, labels, depth, ret_label);
                     asm.push_str(&format!(".L{end_label}:\n"));
                 }
             }
         }
 
         //version 4: while loops re-test the condition at the top and use a back
-        //edge (`jmp .Lstart`) to repeat.
+        //edge (`jmp .Lstart`) to repeat
         //  .Lstart:
         //   <cond>
         //   cmp rax, 0
@@ -126,10 +171,10 @@ fn gen_stmt(asm: &mut String, stmt: &Stmt, symbols: &SymbolTable, labels: &mut u
             let end_label = next_label(labels);
 
             asm.push_str(&format!(".L{start_label}:\n"));
-            gen_expr(asm, cond, symbols, labels);
+            gen_expr(asm, cond, symbols, labels, depth);
             asm.push_str("  cmp rax, 0\n");
             asm.push_str(&format!("  je .L{end_label}\n"));
-            gen_stmt(asm, body, symbols, labels);
+            gen_stmt(asm, body, symbols, labels, depth, ret_label);
             asm.push_str(&format!("  jmp .L{start_label}\n"));
             asm.push_str(&format!(".L{end_label}:\n"));
         }
@@ -155,19 +200,19 @@ fn gen_stmt(asm: &mut String, stmt: &Stmt, symbols: &SymbolTable, labels: &mut u
             let end_label = next_label(labels);
 
             if let Some(init) = init {
-                gen_stmt(asm, init, symbols, labels);
+                gen_stmt(asm, init, symbols, labels, depth, ret_label);
             }
 
             asm.push_str(&format!(".L{start_label}:\n"));
-            // an absent condition means "always true": skip the test entirely.
+            // an absent condition means "always true": skip the test entirely
             if let Some(cond) = cond {
-                gen_expr(asm, cond, symbols, labels);
+                gen_expr(asm, cond, symbols, labels, depth);
                 asm.push_str("  cmp rax, 0\n");
                 asm.push_str(&format!("  je .L{end_label}\n"));
             }
-            gen_stmt(asm, body, symbols, labels);
+            gen_stmt(asm, body, symbols, labels, depth, ret_label);
             if let Some(step) = step {
-                gen_expr(asm, step, symbols, labels);
+                gen_expr(asm, step, symbols, labels, depth);
             }
             asm.push_str(&format!("  jmp .L{start_label}\n"));
             asm.push_str(&format!(".L{end_label}:\n"));
@@ -176,7 +221,7 @@ fn gen_stmt(asm: &mut String, stmt: &Stmt, symbols: &SymbolTable, labels: &mut u
 }
 
 //new function that recursively emits assembly for expression trees built by parser
-fn gen_expr(asm: &mut String, expr: &Expr, symbols: &SymbolTable, labels: &mut usize) {
+fn gen_expr(asm: &mut String, expr: &Expr, symbols: &SymbolTable, labels: &mut usize, depth: &mut i64) {
     match expr {
         Expr::Int(value) => {
             asm.push_str(&format!("  mov rax, {value}\n"));
@@ -191,22 +236,22 @@ fn gen_expr(asm: &mut String, expr: &Expr, symbols: &SymbolTable, labels: &mut u
 
         //version 3: evaluate the right hand side into rax, then store it into the variable's slot
         Expr::Assign(name, value) => {
-            gen_expr(asm, value, symbols, labels);
+            gen_expr(asm, value, symbols, labels, depth);
             let offset = symbols.offsets[name];
             asm.push_str(&format!("  mov [rbp-{offset}], rax\n"));
         }
 
         Expr::Unary(UnaryOp::Neg, inner) => {
-            gen_expr(asm, inner, symbols, labels);
+            gen_expr(asm, inner, symbols, labels, depth);
             asm.push_str("  neg rax\n");
         }
 
         Expr::Binary(op, lhs, rhs) => {
-            gen_expr(asm, lhs, symbols, labels);
-            asm.push_str("  push rax\n");
+            gen_expr(asm, lhs, symbols, labels, depth);
+            push(asm, depth);
 
-            gen_expr(asm, rhs, symbols, labels);
-            asm.push_str("  pop rdi\n");
+            gen_expr(asm, rhs, symbols, labels, depth);
+            pop(asm, depth, "rdi");
             // after this: rdi = left operand, rax = right operand
 
             match op {
@@ -265,10 +310,10 @@ fn gen_expr(asm: &mut String, expr: &Expr, symbols: &SymbolTable, labels: &mut u
 
             match op {
                 LogicalOp::And => {
-                    gen_expr(asm, lhs, symbols, labels);
+                    gen_expr(asm, lhs, symbols, labels, depth);
                     asm.push_str("  cmp rax, 0\n");
                     asm.push_str(&format!("  je .L{short_label}\n"));
-                    gen_expr(asm, rhs, symbols, labels);
+                    gen_expr(asm, rhs, symbols, labels, depth);
                     asm.push_str("  cmp rax, 0\n");
                     asm.push_str(&format!("  je .L{short_label}\n"));
                     // both sides truthy -> 1
@@ -280,10 +325,10 @@ fn gen_expr(asm: &mut String, expr: &Expr, symbols: &SymbolTable, labels: &mut u
                 }
 
                 LogicalOp::Or => {
-                    gen_expr(asm, lhs, symbols, labels);
+                    gen_expr(asm, lhs, symbols, labels, depth);
                     asm.push_str("  cmp rax, 0\n");
                     asm.push_str(&format!("  jne .L{short_label}\n"));
-                    gen_expr(asm, rhs, symbols, labels);
+                    gen_expr(asm, rhs, symbols, labels, depth);
                     asm.push_str("  cmp rax, 0\n");
                     asm.push_str(&format!("  jne .L{short_label}\n"));
                     asm.push_str("  mov rax, 0\n");
@@ -292,6 +337,31 @@ fn gen_expr(asm: &mut String, expr: &Expr, symbols: &SymbolTable, labels: &mut u
                     asm.push_str("  mov rax, 1\n");
                     asm.push_str(&format!(".L{end_label}:\n"));
                 }
+            }
+        }
+
+        //version 5: a function call
+        // 1. Evaluate each argument from left to right, pushing each result so a later
+        //    argument's evaluation can't clobber an earlier one
+        // 2. Pop them back into the argument registers,popping high-index-first 
+        //    lands each value in the right register
+        // 3. Align rsp to 16 before `call`, as the ABI requires, rsp is aligned if
+        //    `depth` is even, so when it's odd we nudge rsp by 8 around the call
+        Expr::Call(name, args) => {
+            for arg in args {
+                gen_expr(asm, arg, symbols, labels, depth);
+                push(asm, depth);
+            }
+            for i in (0..args.len()).rev() {
+                pop(asm, depth, ARG_REGS[i]);
+            }
+
+            if *depth % 2 != 0 {
+                asm.push_str("  sub rsp, 8\n");
+                asm.push_str(&format!("  call {name}\n"));
+                asm.push_str("  add rsp, 8\n");
+            } else {
+                asm.push_str(&format!("  call {name}\n"));
             }
         }
     }

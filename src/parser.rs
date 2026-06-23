@@ -12,11 +12,22 @@ impl Parser {
         Self { tokens, pos: 0 }
     }
 
+    //version 5: a program is now zero or more functions one after another up to EOF
     pub fn parse_program(&mut self) -> Result<Program, String> {
+        let mut functions = Vec::new();
+        while !self.at(TokenKind::Eof) {
+            functions.push(self.parse_function()?);
+        }
+        Ok(Program { functions })
+    }
+
+    //version 5: int name(params) { body }
+    fn parse_function(&mut self) -> Result<Function, String> {
         self.expect(TokenKind::IntKw)?;
         let name = self.expect_ident()?;
 
         self.expect(TokenKind::LParen)?;
+        let params = self.parse_params()?;
         self.expect(TokenKind::RParen)?;
 
         self.expect(TokenKind::LBrace)?;
@@ -29,11 +40,24 @@ impl Parser {
         }
 
         self.expect(TokenKind::RBrace)?;
-        self.expect(TokenKind::Eof)?;
 
-        Ok(Program {
-            function: Function { name, body },
-        })
+        Ok(Function { name, params, body })
+    }
+
+    //version 5: a comma separated list of int name parameters(could be empty)
+    fn parse_params(&mut self) -> Result<Vec<String>, String> {
+        let mut params = Vec::new();
+        if self.at(TokenKind::RParen) {
+            return Ok(params); //no parameters
+        }
+        loop {
+            self.expect(TokenKind::IntKw)?; // every parameter is typed int
+            params.push(self.expect_ident()?);
+            if !self.consume(TokenKind::Comma) {
+                break;
+            }
+        }
+        Ok(params)
     }
 
     //version 3: decide which kind of statement we're looking at and parse it
@@ -333,18 +357,40 @@ impl Parser {
         if self.at(TokenKind::Number){
             return Ok(Expr::Int(self.expect_number()?));
         }
-        //version 3: a bare identifier is a variable read, e.g. `x`
+        //version 3: a bare identifier is a variable read, for example `x`
+        //version 5: unless it's immediately followed by `(`, which makes it a call
         if self.at(TokenKind::Ident){
-            return Ok(Expr::Var(self.expect_ident()?));
+            let name = self.expect_ident()?;
+            if self.consume(TokenKind::LParen) {
+                let args = self.parse_args()?;
+                self.expect(TokenKind::RParen)?;
+                return Ok(Expr::Call(name, args));
+            }
+            return Ok(Expr::Var(name));
         }
         Err(self.error_here("expected expression"))
+    }
+
+    //version 5: a comma separated list of argument expressions(could be empty)
+    fn parse_args(&mut self) -> Result<Vec<Expr>, String> {
+        let mut args = Vec::new();
+        if self.at(TokenKind::RParen) {
+            return Ok(args); //no arguments
+        }
+        loop {
+            args.push(self.parse_expr()?);
+            if !self.consume(TokenKind::Comma) {
+                break;
+            }
+        }
+        Ok(args)
     }
 
     // ---- token-stream helpers ----
 
     fn peek(&self) -> &Token {
         // There is always an Eof token at the end, so indexing the clamped
-        // position is safe even once we've consumed everything.
+        // position is safe even once we've consumed everything
         let idx = self.pos.min(self.tokens.len() - 1);
         &self.tokens[idx]
     }
@@ -353,7 +399,7 @@ impl Parser {
         self.peek().kind == kind
     }
 
-    // Advance past the current token and hand it back.
+    // Advance past the current token and hand it back
     fn advance(&mut self) -> Token {
         let tok = self.peek().clone();
         if self.pos < self.tokens.len() {
@@ -362,7 +408,7 @@ impl Parser {
         tok
     }
 
-    // If the current token matches `kind`, consume it and return true.
+    // If the current token matches `kind`, consume it and return true
     fn consume(&mut self, kind: TokenKind) -> bool {
         if self.at(kind) {
             self.advance();
@@ -372,7 +418,7 @@ impl Parser {
         }
     }
 
-    // Consume a token of the expected kind or produce an error.
+    // Consume a token of the expected kind or produce an error
     fn expect(&mut self, kind: TokenKind) -> Result<Token, String> {
         if self.at(kind.clone()) {
             Ok(self.advance())

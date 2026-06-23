@@ -1,11 +1,16 @@
 #[derive(Debug, Clone, PartialEq)]
 pub struct Program{
-    pub function: Function,
+    //version 5: Since I'm adding functions, I changed this to make a program a list of functions
+    pub functions: Vec<Function>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Function{
     pub name: String,
+    //version 5: now funcs need params, so this is for
+    // parameter names in order, their position decides
+    //which incoming argument register they map to
+    pub params: Vec<String>,
     //version 3: a function body is now a sequence of statements, not just one return
     //this lets us write things like `int x = 3; return x;`
     pub body: Vec<Stmt>,
@@ -19,7 +24,7 @@ pub enum Stmt{
     Expr(Expr),
     //version 4: structured control flow
     Block(Vec<Stmt>),
-    //`if (cond) then_branch [else else_branch]`. branches are boxed because a Stmt
+    //if then else branches are boxed because a Stmt
     //can recursively contain more statements
     If {
         cond: Expr,
@@ -50,7 +55,7 @@ pub struct VarDecl{
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr{
     Int(i64),
-    //commit 2: now I'm gonna add unary and binary expressions so the compiler can do math/PEMDAS
+    //version 2: now I'm gonna add unary and binary expressions so the compiler can do math/PEMDAS
     Binary(BinaryOp, Box<Expr>, Box<Expr>),
     Unary(UnaryOp, Box<Expr>),
     //version 3: reading a variable by name
@@ -60,6 +65,8 @@ pub enum Expr{
     //version 4: short-circuiting `&&` / `||`
     //what that means is the right side doesn't always have to be evaluated
     Logical(LogicalOp, Box<Expr>, Box<Expr>),
+    //version 5: a function call, the result comes back in rax
+    Call(String, Vec<Expr>),
 }
 
 #[derive(Debug, Clone, PartialEq)]

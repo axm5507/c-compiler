@@ -16,6 +16,8 @@ pub enum TokenKind{
     LBrace,
     RBrace,
     Semi,
+    //version 5: argument/parameter separator
+    Comma,
     Eof,
     //version 2 edits
     Plus,
@@ -193,6 +195,7 @@ impl<'a> Lexer<'a> {
             '{' => TokenKind::LBrace,
             '}' => TokenKind::RBrace,
             ';' => TokenKind::Semi,
+            ',' => TokenKind::Comma,
 
             other => {
                 return Err(format!(
