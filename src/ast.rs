@@ -49,7 +49,16 @@ pub enum Stmt{
 #[derive(Debug, Clone, PartialEq)]
 pub struct VarDecl{
     pub name: String,
+    //version 6: adding type
+    pub ty: Type,
     pub init: Option<Expr>,
+}
+
+//version 6: Adding type for pointers
+#[derive(Debug, Clone, PartialEq)]
+pub enum Type {
+    Int,
+    Ptr(Box<Type>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -61,7 +70,8 @@ pub enum Expr{
     //version 3: reading a variable by name
     Var(String),
     //version 3: assigning to a variable
-    Assign(String, Box<Expr>),
+    //version 6: changing to include type of variable being assigned to
+    Assign(Box<Expr>, Box<Expr>),
     //version 4: short-circuiting `&&` / `||`
     //what that means is the right side doesn't always have to be evaluated
     Logical(LogicalOp, Box<Expr>, Box<Expr>),
@@ -88,6 +98,9 @@ pub enum BinaryOp{
 #[derive(Debug, Clone, PartialEq)]
 pub enum UnaryOp{
     Neg,
+    //version 6: &x and *x
+    Addr,
+    Deref,
 }
 
 //version 4: the two short circuiting logical operators
