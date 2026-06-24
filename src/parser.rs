@@ -51,8 +51,12 @@ impl Parser {
             return Ok(params); //no parameters
         }
         loop {
-            self.expect(TokenKind::IntKw)?; // every parameter is typed int
-            params.push(self.expect_ident()?);
+            let ty = self.parse_type()?; // every parameter is typed int
+            let name = self.expect_ident()?;
+            params.push(Param{
+                name,
+                ty,
+            });
             if !self.consume(TokenKind::Comma) {
                 break;
             }
@@ -182,7 +186,9 @@ impl Parser {
 
     //version 3: parsing a local variable declaration
     fn parse_decl(&mut self) -> Result<Stmt, String> {
-        self.expect(TokenKind::IntKw)?;
+        //self.expect(TokenKind::IntKw)?;
+        //version 6: replacing the above line with a call to parse_type() so we can handle pointers
+        let ty = self.parse_type()?;
         let name = self.expect_ident()?;
 
         let init = if self.consume(TokenKind::Assign) {
@@ -192,7 +198,17 @@ impl Parser {
         };
 
         self.expect(TokenKind::Semi)?;
-        Ok(Stmt::Decl(VarDecl { name, init }))
+        Ok(Stmt::Decl(VarDecl { name, ty, init }))
+    }
+
+    //version 6L parsing a local variable declaration with type
+    fn parse_type(&mut self) -> Result<Type, String> {
+        self.expect(TokenKind::IntKw)?;
+        let mut ty = Type::Int;
+        while self.consume(TokenKind::Star) {
+            ty = Type::Ptr(Box::new(ty));
+        }
+        Ok(ty)
     }
 
     //now adding the parsing of different mathematical stuff for version 2
@@ -210,8 +226,10 @@ impl Parser {
 
         if self.consume(TokenKind::Assign) {
             let value = self.parse_assign()?;
-            if let Expr::Var(name) = expr {
-                return Ok(Expr::Assign(name, Box::new(value)));
+            //if let Expr::Var(name) = expr {
+            //    return Ok(Expr::Assign(name, Box::new(value)));
+            //version 6: changing to include type of variable being assigned to
+            return Ok(Expr::Assign(Box::new(expr), Box::new(value)));
             }
             return Err(self.error_here("invalid assignment target (left side must be a variable)"));
         }
@@ -338,10 +356,23 @@ impl Parser {
     
     }
     //for negative nums
+    //version 6: Now for &x and *x, not just -x
     fn parse_unary(&mut self) -> Result<Expr, String>{
         if self.consume(TokenKind::Minus){
             return Ok(Expr::Unary(
                 UnaryOp::Neg,
+                Box::new(self.parse_unary()?),
+                ));
+        }
+        if self.consume(TokenKind::Amp){
+            return Ok(Expr::Unary(
+                UnaryOp::Addr,
+                Box::new(self.parse_unary()?),
+                ));
+        }
+        if self.consume(TokenKind::Star){
+            return Ok(Expr::Unary(
+                UnaryOp::Deref,
                 Box::new(self.parse_unary()?),
                 ));
         }

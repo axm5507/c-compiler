@@ -10,10 +10,17 @@ pub struct Function{
     //version 5: now funcs need params, so this is for
     // parameter names in order, their position decides
     //which incoming argument register they map to
-    pub params: Vec<String>,
+    pub params: Vec<Param>,
     //version 3: a function body is now a sequence of statements, not just one return
     //this lets us write things like `int x = 3; return x;`
     pub body: Vec<Stmt>,
+}
+
+//version 6: add pub struct for param
+#[derive(Debug, Clone, PartialEq)]
+pub struct Param {
+    pub name: String,
+    pub ty: Type,
 }
 
 #[derive(Debug, Clone, PartialEq)]
