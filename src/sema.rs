@@ -13,7 +13,7 @@
 
 use std::collections::HashMap;
 
-use crate::ast::{Expr, Program, Stmt};
+use crate::ast::{Expr, Program, Stmt, Type, UnaryOp,};
 
 //version 5: the System V AMD64 convention only passes the first 6 integer
 //arguments in registers (rdi, rsi, rdx, rcx, r8, r9). I didn't implement the
@@ -34,10 +34,16 @@ pub struct ProgramLayout {
     pub functions: HashMap<String, SymbolTable>,
 }
 
+//version 6: struct for symbol
+pub struct Symbol{
+    offset: i64,
+    ty: Type,
+}
+
 struct Analyzer<'a> {
     //version 3: Right now the grammar only produces one scope, but the
     // stack is here so nested { } blocks can be added later without rework
-    scopes: Vec<HashMap<String, i64>>,
+    scopes: Vec<HashMap<String, Symbol>>,
     offsets: HashMap<String, i64>,
     next_offset: i64,
     //version 5: name -> parameter count for every function in the program, so we
@@ -55,7 +61,7 @@ impl<'a> Analyzer<'a> {
         }
     }
 
-    fn declare(&mut self, name: &str) -> Result<(), String> {
+    fn declare(&mut self, name: &str, ty: Type) -> Result<(), String> {
         let scope = self.scopes.last_mut().expect("there is always one scope");
         if scope.contains_key(name) {
             return Err(format!("duplicate declaration of variable '{name}'"));
@@ -63,30 +69,43 @@ impl<'a> Analyzer<'a> {
 
         self.next_offset += 8;
         let offset = self.next_offset;
-        scope.insert(name.to_string(), offset);
+        scope.insert(name.to_string(), Symbol { offset, ty });
         self.offsets.insert(name.to_string(), offset);
         Ok(())
     }
 
     // Look a name up from the innermost scope outward, error if never declared
-    fn resolve(&self, name: &str) -> Result<i64, String> {
+    fn resolve(&self, name: &str) -> Result<Symbol, String> {
         for scope in self.scopes.iter().rev() {
-            if let Some(&offset) = scope.get(name) {
-                return Ok(offset);
+            if let Some(sym) = scope.get(name) {
+                return Ok(*sym);
             }
         }
         Err(format!("use of undeclared variable '{name}'"))
     }
-
+//version 6: adding lvalue checking
+    fn is_lvalue(expr: &Expr) -> bool {
+        match expr {
+            Expr::Var(_) => true,
+            Expr::Unary(UnaryOp::Deref, _) => true,
+            _ => false,
+        }
+    }
     fn check_stmt(&mut self, stmt: &Stmt) -> Result<(), String> {
         match stmt {
             Stmt::Return(expr) => self.check_expr(expr),
             Stmt::Expr(expr) => self.check_expr(expr),
             Stmt::Decl(decl) => {
                 if let Some(init) = &decl.init {
-                    self.check_expr(init)?;
+                    let init_ty = self.check_expr(init)?;
+                    if init_ty != decl.ty {
+                        return Err(format!(
+                            "variable '{}' declared as {:?} but initialized with {:?}",
+                            decl.name
+                        ));
+                    }
                 }
-                self.declare(&decl.name)
+                self.declare(&decl.name, decl.ty.clone())
             }
 
             //version 4: a condition is just an expression (C has no separate bool
@@ -134,24 +153,62 @@ impl<'a> Analyzer<'a> {
         }
     }
 
-    fn check_expr(&self, expr: &Expr) -> Result<(), String> {
+    fn check_expr(&self, expr: &Expr) -> Result<Type, String> {
         match expr {
-            Expr::Int(_) => Ok(()),
-            Expr::Var(name) => self.resolve(name).map(|_| ()),
-            Expr::Assign(name, value) => {
+            Expr::Int(_) => Ok(Type::Int),
+            Expr::Var(name) => {
+                Ok(self.resolve(name)?.ty.clone())
+            }
+            Expr::Assign(lhs, rhs) => {
                 // both the target and the value have to be valid
-                self.resolve(name)?;
-                self.check_expr(value)
+                if !Self::is_lvalue(lhs) {
+                    return Err("assignment requires an lvalue on the left side".to_string());
+                }
+                let lhs_ty = self.check_expr(lhs)?;
+                let rhs_ty = self.check_expr(rhs)?;
+                if lhs_ty != rhs_ty {
+                    return Err("assignment requires both sides to have the same type".to_string());
+                }
+                Ok(lhs_ty)
             }
             Expr::Binary(_, lhs, rhs) => {
-                self.check_expr(lhs)?;
-                self.check_expr(rhs)
+                let lhs_ty = self.check_expr(lhs)?;
+                let rhs_ty = self.check_expr(rhs)?;
+                if lhs_ty != Type::Int || rhs_ty != Type::Int {
+                    return Err("binary operator requires integer operands".to_string());
+                }
+                Ok(Type::Int)
             }
-            Expr::Unary(_, inner) => self.check_expr(inner),
+            Expr::Unary(op, inner) => {
+                let inner_ty = self.check_expr(inner)?;
+                match op {
+                    UnaryOp::Neg => {
+                        if inner_ty != Type::Int {
+                            return Err("unary minus requires an integer operand".to_string());
+                        }
+                        Ok(Type::Int)
+                    }
+                    UnaryOp::Addr => {
+                        //version 6: &x returns a pointer to x's type
+                        if !Self::is_lvalue(inner) {
+                            return Err("address-of requires an lvalue operand".to_string());
+                        }
+                        Ok(Type::Ptr(Box::new(inner_ty)))
+                    }
+                    UnaryOp::Deref => {
+                        //version 6: *x requires x to be a pointer and returns the type it points to
+                        match inner_ty {
+                            Type::Ptr(inner) => Ok(*inner),
+                            _ => Err("dereference requires a pointer operand".to_string()),
+                        }
+                    }
+                }
+            }
             //version 4: a logical operator just needs both operands to be valid
             Expr::Logical(_, lhs, rhs) => {
                 self.check_expr(lhs)?;
-                self.check_expr(rhs)
+                self.check_expr(rhs)?;
+                Ok(Type::Int)
             }
             Expr::Call(name, args) => {
                 match self.signatures.get(name) {
@@ -168,7 +225,7 @@ impl<'a> Analyzer<'a> {
                 for arg in args {
                     self.check_expr(arg)?;
                 }
-                Ok(())
+                Ok(Type::Int)
             }
         }
     }
@@ -201,7 +258,7 @@ pub fn analyze(program: &Program) -> Result<ProgramLayout, String> {
         // Parameters are locals too: declare them first so they get the lowest
         // stack slots which is the order codegen relies on when spilling the argument registers
         for param in &func.params {
-            analyzer.declare(param)?;
+            analyzer.declare(&param.name, param.ty.clone())?;
         }
 
         for stmt in &func.body {
