@@ -42,6 +42,8 @@ pub enum TokenKind{
     //version 4: short circuiting logical operators
     AndAnd, // &&
     OrOr,   // ||
+    //Version 6: Adding reference of(&)
+    Amp,
 }
 
 //version 2 additions
@@ -180,11 +182,13 @@ impl<'a> Lexer<'a> {
             }
             '>' => TokenKind::Gt,
 
-            // `&` and `|` will only ever appear doubled 
+            // `&` and `|` will sometimes appear doubled 
             '&' if self.peek() == Some('&') => {
                 self.bump();
                 TokenKind::AndAnd
             }
+            // version 6: single & is for reference of
+            '&' => TokenKind::Amp,
             '|' if self.peek() == Some('|') => {
                 self.bump();
                 TokenKind::OrOr

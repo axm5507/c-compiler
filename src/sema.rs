@@ -1,4 +1,4 @@
-//I wrote this for version 3
+﻿//I wrote this for version 3
 //this code does 2 jobs right now, validation and storage layout.
 //When an undeclared variable is used, or a variable is declared twice in
 //one scope like int x = x, it will reject the program.
@@ -6,7 +6,7 @@
 //record it as an offset from rbp. Codegen later handles each variable as
 //[rbp - offset].
 //
-//version 5: I now made it so there can be there are now multiple functions. 
+//version 5: I now made it so there can be there are now multiple functions.
 // We first collect every function's name and parameters so a call can refer to a
 //function defined later in the file. Then we check each body in turn, with its
 //parameters already declared as locals.
@@ -41,7 +41,7 @@ struct Analyzer<'a> {
     offsets: HashMap<String, i64>,
     next_offset: i64,
     //version 5: name -> parameter count for every function in the program, so we
-    //can validate a function existing and having the right number of arguments 
+    //can validate a function existing and having the right number of arguments
     signatures: &'a HashMap<String, usize>,
 }
 
@@ -153,9 +153,6 @@ impl<'a> Analyzer<'a> {
                 self.check_expr(lhs)?;
                 self.check_expr(rhs)
             }
-            //version 5: a call must target a known function and pass exactly as many
-            //arguments as that function declares
-            // then every argument expression has to check out
             Expr::Call(name, args) => {
                 match self.signatures.get(name) {
                     None => return Err(format!("call to undefined function '{name}'")),
