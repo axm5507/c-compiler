@@ -44,6 +44,12 @@ pub enum TokenKind{
     OrOr,   // ||
     //Version 6: Adding reference of(&)
     Amp,
+    //version 7: arrays and structs
+    LBracket, 
+    RBracket,  
+    Dot,      
+    Arrow,     // ->  (sugar for (*ptr).field)
+    StructKw,  
 }
 
 //version 2 additions
@@ -136,6 +142,8 @@ impl<'a> Lexer<'a> {
             "else" => TokenKind::ElseKw,
             "while" => TokenKind::WhileKw,
             "for" => TokenKind::ForKw,
+            //version 7: struct keyword
+            "struct" => TokenKind::StructKw,
             _ => TokenKind::Ident,
         };
 
@@ -151,6 +159,11 @@ impl<'a> Lexer<'a> {
 
         let kind = match self.bump().unwrap() {
             '+' => TokenKind::Plus,
+            //version 7: -> must be checked before bare -
+            '-' if self.peek() == Some('>') => {
+                self.bump();
+                TokenKind::Arrow
+            }
             '-' => TokenKind::Minus,
             '*' => TokenKind::Star,
             '/' => TokenKind::Slash,
@@ -182,7 +195,7 @@ impl<'a> Lexer<'a> {
             }
             '>' => TokenKind::Gt,
 
-            // `&` and `|` will sometimes appear doubled 
+            // `&` and `|` will sometimes appear doubled
             '&' if self.peek() == Some('&') => {
                 self.bump();
                 TokenKind::AndAnd
@@ -200,6 +213,10 @@ impl<'a> Lexer<'a> {
             '}' => TokenKind::RBrace,
             ';' => TokenKind::Semi,
             ',' => TokenKind::Comma,
+            //version 7: array subscript brackets and struct field access
+            '[' => TokenKind::LBracket,
+            ']' => TokenKind::RBracket,
+            '.' => TokenKind::Dot,
 
             other => {
                 return Err(format!(

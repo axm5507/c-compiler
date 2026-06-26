@@ -1,4 +1,4 @@
-﻿use crate::ast::{BinaryOp, Expr, Function, LogicalOp, Program, Stmt, UnaryOp};
+﻿use crate::ast::{BinaryOp, Expr, Function, LogicalOp, Program, Stmt, Type, UnaryOp};
 use crate::sema::{ProgramLayout, SymbolTable};
 
 //version 5: the System V AMD64 calling convention passes the first six integer/
@@ -27,6 +27,50 @@ fn pop(asm: &mut String, depth: &mut i64, reg: &str) {
     *depth -= 1;
 }
 
+//version 7: compute how many bytes a type occupies
+fn type_size(ty: &Type, layout: &ProgramLayout) -> i64 {
+    match ty {
+        Type::Int | Type::Ptr(_) => 8,
+        Type::Array(elem, n) => (*n as i64) * type_size(elem, layout),
+        Type::Struct(name) => layout.structs[name].size,
+    }
+}
+
+//version 7: derive the type of any expression at code-generation time
+//Sema already validated the tree, so every branch is guaranteed to be well-formed
+//and we can panic on impossible cases rather than returning Result
+fn expr_type(expr: &Expr, symbols: &SymbolTable, layout: &ProgramLayout) -> Type {
+    match expr {
+        Expr::Int(_) => Type::Int,
+        Expr::Var(name) => symbols.types[name].clone(),
+        Expr::Assign(lhs, _) => expr_type(lhs, symbols, layout),
+        Expr::Binary(_, _, _) | Expr::Logical(_, _, _) | Expr::Call(_, _) => Type::Int,
+        Expr::Unary(UnaryOp::Neg, _) => Type::Int,
+        Expr::Unary(UnaryOp::Addr, inner) => {
+            Type::Ptr(Box::new(expr_type(inner, symbols, layout)))
+        }
+        Expr::Unary(UnaryOp::Deref, inner) => match expr_type(inner, symbols, layout) {
+            Type::Ptr(t) => *t,
+            _ => panic!("codegen: deref of non-pointer (sema should have caught this)"),
+        },
+        Expr::Index(arr, _) => match expr_type(arr, symbols, layout) {
+            Type::Array(elem, _) => *elem,
+            Type::Ptr(elem) => *elem,
+            _ => panic!("codegen: index of non-array/pointer"),
+        },
+        Expr::Field(obj, field) => match expr_type(obj, symbols, layout) {
+            Type::Struct(name) => layout.structs[&name]
+                .fields
+                .iter()
+                .find(|f| f.name == *field)
+                .expect("codegen: field not found in struct layout")
+                .ty
+                .clone(),
+            _ => panic!("codegen: field access on non-struct"),
+        },
+    }
+}
+
 pub fn generate(program: &Program, layout: &ProgramLayout) -> String {
     let mut asm = String::new();
     asm.push_str(".intel_syntax noprefix\n");
@@ -36,14 +80,20 @@ pub fn generate(program: &Program, layout: &ProgramLayout) -> String {
     let mut labels = 0usize;
     for func in &program.functions {
         let symbols = &layout.functions[&func.name];
-        gen_function(&mut asm, func, symbols, &mut labels);
+        gen_function(&mut asm, func, symbols, layout, &mut labels);
     }
 
     asm
 }
 
 //version 5: emit one complete function
-fn gen_function(asm: &mut String, func: &Function, symbols: &SymbolTable, labels: &mut usize) {
+fn gen_function(
+    asm: &mut String,
+    func: &Function,
+    symbols: &SymbolTable,
+    layout: &ProgramLayout,
+    labels: &mut usize,
+) {
     asm.push_str(&format!(".globl {}\n", func.name));
     asm.push_str(&format!("{}:\n", func.name));
 
@@ -70,7 +120,7 @@ fn gen_function(asm: &mut String, func: &Function, symbols: &SymbolTable, labels
     let mut depth = 0i64;
 
     for stmt in &func.body {
-        gen_stmt(asm, stmt, symbols, labels, &mut depth, &ret_label);
+        gen_stmt(asm, stmt, symbols, layout, labels, &mut depth, &ret_label);
     }
 
     // epilogue: every `return` jumps here after leaving its value in rax, we also
@@ -86,36 +136,53 @@ fn gen_stmt(
     asm: &mut String,
     stmt: &Stmt,
     symbols: &SymbolTable,
+    layout: &ProgramLayout,
     labels: &mut usize,
     depth: &mut i64,
     ret_label: &str,
 ) {
     match stmt {
         Stmt::Return(expr) => {
-            gen_expr(asm, expr, symbols, labels, depth);
+            gen_expr(asm, expr, symbols, layout, labels, depth);
             asm.push_str(&format!("  jmp {ret_label}\n"));
         }
 
-
         Stmt::Expr(expr) => {
-            gen_expr(asm, expr, symbols, labels, depth);
+            gen_expr(asm, expr, symbols, layout, labels, depth);
         }
 
         // evaluate the initializer (defaulting to 0) into rax, then
         // store it into the variable's stack slot
         Stmt::Decl(decl) => {
-            match &decl.init {
-                Some(init) => gen_expr(asm, init, symbols, labels, depth),
-                None => asm.push_str("  mov rax, 0\n"),
-            }
             let offset = symbols.offsets[&decl.name];
-            asm.push_str(&format!("  mov [rbp-{offset}], rax\n"));
+            let ty = &symbols.types[&decl.name];
+
+            match ty {
+                Type::Int | Type::Ptr(_) => {
+                    //scalar: initialize from expression or default to 0
+                    match &decl.init {
+                        Some(init) => gen_expr(asm, init, symbols, layout, labels, depth),
+                        None => asm.push_str("  mov rax, 0\n"),
+                    }
+                    asm.push_str(&format!("  mov [rbp-{offset}], rax\n"));
+                }
+                Type::Array(_, _) | Type::Struct(_) => {
+                    //version 7: aggregate types are zero initialized slot by slot
+                    let size = type_size(ty, layout);
+                    let slots = size / 8;
+                    asm.push_str("  xor rax, rax\n");
+                    for i in 0..slots {
+                        let slot_off = offset - i * 8;
+                        asm.push_str(&format!("  mov [rbp-{slot_off}], rax\n"));
+                    }
+                }
+            }
         }
 
         //version 4: a block just emits its statements in order
         Stmt::Block(stmts) => {
             for s in stmts {
-                gen_stmt(asm, s, symbols, labels, depth, ret_label);
+                gen_stmt(asm, s, symbols, layout, labels, depth, ret_label);
             }
         }
 
@@ -137,21 +204,21 @@ fn gen_stmt(
             let else_label = next_label(labels);
             let end_label = next_label(labels);
 
-            gen_expr(asm, cond, symbols, labels, depth);
+            gen_expr(asm, cond, symbols, layout, labels, depth);
             asm.push_str("  cmp rax, 0\n");
 
             match else_branch {
                 Some(else_branch) => {
                     asm.push_str(&format!("  je .L{else_label}\n"));
-                    gen_stmt(asm, then_branch, symbols, labels, depth, ret_label);
+                    gen_stmt(asm, then_branch, symbols, layout, labels, depth, ret_label);
                     asm.push_str(&format!("  jmp .L{end_label}\n"));
                     asm.push_str(&format!(".L{else_label}:\n"));
-                    gen_stmt(asm, else_branch, symbols, labels, depth, ret_label);
+                    gen_stmt(asm, else_branch, symbols, layout, labels, depth, ret_label);
                     asm.push_str(&format!(".L{end_label}:\n"));
                 }
                 None => {
                     asm.push_str(&format!("  je .L{end_label}\n"));
-                    gen_stmt(asm, then_branch, symbols, labels, depth, ret_label);
+                    gen_stmt(asm, then_branch, symbols, layout, labels, depth, ret_label);
                     asm.push_str(&format!(".L{end_label}:\n"));
                 }
             }
@@ -171,10 +238,10 @@ fn gen_stmt(
             let end_label = next_label(labels);
 
             asm.push_str(&format!(".L{start_label}:\n"));
-            gen_expr(asm, cond, symbols, labels, depth);
+            gen_expr(asm, cond, symbols, layout, labels, depth);
             asm.push_str("  cmp rax, 0\n");
             asm.push_str(&format!("  je .L{end_label}\n"));
-            gen_stmt(asm, body, symbols, labels, depth, ret_label);
+            gen_stmt(asm, body, symbols, layout, labels, depth, ret_label);
             asm.push_str(&format!("  jmp .L{start_label}\n"));
             asm.push_str(&format!(".L{end_label}:\n"));
         }
@@ -200,19 +267,19 @@ fn gen_stmt(
             let end_label = next_label(labels);
 
             if let Some(init) = init {
-                gen_stmt(asm, init, symbols, labels, depth, ret_label);
+                gen_stmt(asm, init, symbols, layout, labels, depth, ret_label);
             }
 
             asm.push_str(&format!(".L{start_label}:\n"));
             // an absent condition means "always true": skip the test entirely
             if let Some(cond) = cond {
-                gen_expr(asm, cond, symbols, labels, depth);
+                gen_expr(asm, cond, symbols, layout, labels, depth);
                 asm.push_str("  cmp rax, 0\n");
                 asm.push_str(&format!("  je .L{end_label}\n"));
             }
-            gen_stmt(asm, body, symbols, labels, depth, ret_label);
+            gen_stmt(asm, body, symbols, layout, labels, depth, ret_label);
             if let Some(step) = step {
-                gen_expr(asm, step, symbols, labels, depth);
+                gen_expr(asm, step, symbols, layout, labels, depth);
             }
             asm.push_str(&format!("  jmp .L{start_label}\n"));
             asm.push_str(&format!(".L{end_label}:\n"));
@@ -221,64 +288,137 @@ fn gen_stmt(
 }
 
 //version 6: compute the address of an lvalue into rax (used by Addr and Assign)
-fn gen_addr(asm: &mut String, expr: &Expr, symbols: &SymbolTable, labels: &mut usize, depth: &mut i64) {
+//version 7: extended for Index and Field
+fn gen_addr(
+    asm: &mut String,
+    expr: &Expr,
+    symbols: &SymbolTable,
+    layout: &ProgramLayout,
+    labels: &mut usize,
+    depth: &mut i64,
+) {
     match expr {
         Expr::Var(name) => {
             let offset = symbols.offsets[name];
             asm.push_str(&format!("  lea rax, [rbp-{offset}]\n"));
         }
+
         // *p is an lvalue: the address is whatever p holds
         Expr::Unary(UnaryOp::Deref, inner) => {
-            gen_expr(asm, inner, symbols, labels, depth);
+            gen_expr(asm, inner, symbols, layout, labels, depth);
         }
+
+        //version 7: xs[i] lvalue - compute base address then add scaled index offset.
+        //
+        //   gen_expr(arr)      ; rax = base pointer (array decays, or loaded pointer)
+        //   push rax           ; save base while we compute the index
+        //   gen_expr(idx)      ; rax = index value
+        //   imul rax, <esize>  ; rax = byte offset of the element
+        //   pop  rdi           ; rdi = base pointer
+        //   add  rax, rdi      ; rax = address of xs[i]
+        Expr::Index(arr, idx) => {
+            let arr_ty = expr_type(arr, symbols, layout);
+            let elem_size = match &arr_ty {
+                Type::Array(elem, _) => type_size(elem, layout),
+                Type::Ptr(elem) => type_size(elem, layout),
+                _ => panic!("codegen: index on non-array/pointer"),
+            };
+
+            gen_expr(asm, arr, symbols, layout, labels, depth);
+            push(asm, depth);
+            gen_expr(asm, idx, symbols, layout, labels, depth);
+            asm.push_str(&format!("  imul rax, {elem_size}\n"));
+            pop(asm, depth, "rdi");
+            asm.push_str("  add rax, rdi\n");
+        }
+
+        //version 7: p.field lvalue, compute base address of the struct then add
+        //the pre-computed field byte offset
+        //
+        //   gen_addr(obj)      ; rax = base of struct (or pointer value after Deref)
+        //   add rax, <off>     ; rax = address of the field
+        Expr::Field(obj, field_name) => {
+            let obj_ty = expr_type(obj, symbols, layout);
+            let struct_name = match &obj_ty {
+                Type::Struct(n) => n.clone(),
+                _ => panic!("codegen: field access on non-struct"),
+            };
+            let field_offset = layout.structs[&struct_name]
+                .fields
+                .iter()
+                .find(|f| f.name == *field_name)
+                .expect("codegen: field not found")
+                .offset;
+
+            gen_addr(asm, obj, symbols, layout, labels, depth);
+            if field_offset != 0 {
+                asm.push_str(&format!("  add rax, {field_offset}\n"));
+            }
+        }
+
         _ => panic!("gen_addr called on non-lvalue"),
     }
 }
 
 //new function that recursively emits assembly for expression trees built by parser
-fn gen_expr(asm: &mut String, expr: &Expr, symbols: &SymbolTable, labels: &mut usize, depth: &mut i64) {
+fn gen_expr(
+    asm: &mut String,
+    expr: &Expr,
+    symbols: &SymbolTable,
+    layout: &ProgramLayout,
+    labels: &mut usize,
+    depth: &mut i64,
+) {
     match expr {
         Expr::Int(value) => {
             asm.push_str(&format!("  mov rax, {value}\n"));
         }
 
-        //version 3: read a variable by loading through its stack-slot address
+        //version 3: read a variable by loading through its stack-slot address.
+        //version 7: arrays and structs produce their base address instead of a loaded value
         Expr::Var(name) => {
             let offset = symbols.offsets[name];
             asm.push_str(&format!("  lea rax, [rbp-{offset}]\n"));
-            asm.push_str("  mov rax, [rax]\n");
+            match &symbols.types[name] {
+                Type::Int | Type::Ptr(_) => {
+                    asm.push_str("  mov rax, [rax]\n");
+                }
+                Type::Array(_, _) | Type::Struct(_) => {
+                    // rax already holds the base address, no load needed
+                }
+            }
         }
 
         //version 6: compute address of lhs, evaluate rhs, store through the address
         Expr::Assign(lhs, rhs) => {
-            gen_addr(asm, lhs, symbols, labels, depth);
+            gen_addr(asm, lhs, symbols, layout, labels, depth);
             push(asm, depth);
-            gen_expr(asm, rhs, symbols, labels, depth);
+            gen_expr(asm, rhs, symbols, layout, labels, depth);
             pop(asm, depth, "rdi");
             asm.push_str("  mov [rdi], rax\n");
         }
 
         Expr::Unary(op, inner) => match op {
             UnaryOp::Neg => {
-                gen_expr(asm, inner, symbols, labels, depth);
+                gen_expr(asm, inner, symbols, layout, labels, depth);
                 asm.push_str("  neg rax\n");
             }
             // &x: produce the address of x as a value
             UnaryOp::Addr => {
-                gen_addr(asm, inner, symbols, labels, depth);
+                gen_addr(asm, inner, symbols, layout, labels, depth);
             }
             // *p: load through the pointer value
             UnaryOp::Deref => {
-                gen_expr(asm, inner, symbols, labels, depth);
+                gen_expr(asm, inner, symbols, layout, labels, depth);
                 asm.push_str("  mov rax, [rax]\n");
             }
         },
 
         Expr::Binary(op, lhs, rhs) => {
-            gen_expr(asm, lhs, symbols, labels, depth);
+            gen_expr(asm, lhs, symbols, layout, labels, depth);
             push(asm, depth);
 
-            gen_expr(asm, rhs, symbols, labels, depth);
+            gen_expr(asm, rhs, symbols, layout, labels, depth);
             pop(asm, depth, "rdi");
             // after this: rdi = left operand, rax = right operand
 
@@ -338,10 +478,10 @@ fn gen_expr(asm: &mut String, expr: &Expr, symbols: &SymbolTable, labels: &mut u
 
             match op {
                 LogicalOp::And => {
-                    gen_expr(asm, lhs, symbols, labels, depth);
+                    gen_expr(asm, lhs, symbols, layout, labels, depth);
                     asm.push_str("  cmp rax, 0\n");
                     asm.push_str(&format!("  je .L{short_label}\n"));
-                    gen_expr(asm, rhs, symbols, labels, depth);
+                    gen_expr(asm, rhs, symbols, layout, labels, depth);
                     asm.push_str("  cmp rax, 0\n");
                     asm.push_str(&format!("  je .L{short_label}\n"));
                     // both sides truthy -> 1
@@ -353,10 +493,10 @@ fn gen_expr(asm: &mut String, expr: &Expr, symbols: &SymbolTable, labels: &mut u
                 }
 
                 LogicalOp::Or => {
-                    gen_expr(asm, lhs, symbols, labels, depth);
+                    gen_expr(asm, lhs, symbols, layout, labels, depth);
                     asm.push_str("  cmp rax, 0\n");
                     asm.push_str(&format!("  jne .L{short_label}\n"));
-                    gen_expr(asm, rhs, symbols, labels, depth);
+                    gen_expr(asm, rhs, symbols, layout, labels, depth);
                     asm.push_str("  cmp rax, 0\n");
                     asm.push_str(&format!("  jne .L{short_label}\n"));
                     asm.push_str("  mov rax, 0\n");
@@ -371,13 +511,13 @@ fn gen_expr(asm: &mut String, expr: &Expr, symbols: &SymbolTable, labels: &mut u
         //version 5: a function call
         // 1. Evaluate each argument from left to right, pushing each result so a later
         //    argument's evaluation can't clobber an earlier one
-        // 2. Pop them back into the argument registers,popping high-index-first 
+        // 2. Pop them back into the argument registers, popping high-index-first
         //    lands each value in the right register
         // 3. Align rsp to 16 before `call`, as the ABI requires, rsp is aligned if
         //    `depth` is even, so when it's odd we nudge rsp by 8 around the call
         Expr::Call(name, args) => {
             for arg in args {
-                gen_expr(asm, arg, symbols, labels, depth);
+                gen_expr(asm, arg, symbols, layout, labels, depth);
                 push(asm, depth);
             }
             for i in (0..args.len()).rev() {
@@ -391,6 +531,19 @@ fn gen_expr(asm: &mut String, expr: &Expr, symbols: &SymbolTable, labels: &mut u
             } else {
                 asm.push_str(&format!("  call {name}\n"));
             }
+        }
+
+        //version 7: xs[i] as a value - compute element address then load through it
+        //The load is always a full 64-bit read because all our types are 8-byte slots
+        Expr::Index(_, _) => {
+            gen_addr(asm, expr, symbols, layout, labels, depth);
+            asm.push_str("  mov rax, [rax]\n");
+        }
+
+        //version 7: p.field as a value - compute field address then load through it
+        Expr::Field(_, _) => {
+            gen_addr(asm, expr, symbols, layout, labels, depth);
+            asm.push_str("  mov rax, [rax]\n");
         }
     }
 }

@@ -40,3 +40,4 @@ Version 5 has now been finished. The compiler can now handle multiple functions 
 
 **Update 6:**
 Version 6 is now complete. int* pointer types have been added along with two unary operators: &x(address of) and *x(dereferencing). The type system now tracks pointer depth(ie int\*, int**, etc) and enforces that & only applies to lvalues and * only applies to pointers. Assignmetn is generalized from simple variable writes to lvalue aware stores so *x = 5 and **xx = 5 both work fine. Codegen uses a two function approach where gen_expr produces a value in rax and gen_addr produces an address in rax. Assignment composes the two.
+

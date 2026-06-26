@@ -1,24 +1,51 @@
-use crate::ast::{BinaryOp, Expr, Function, LogicalOp, Param, Program, Stmt, Type, UnaryOp, VarDecl};
+use crate::ast::{
+    BinaryOp, Expr, FieldDecl, Function, LogicalOp, Param, Program, Stmt, StructDecl, Type,
+    UnaryOp, VarDecl,
+};
 use crate::lexer::{Token, TokenKind};
 
-pub struct Parser{
+pub struct Parser {
     tokens: Vec<Token>,
     pos: usize,
 }
 
-//will change this from being so strict and only accepting one thing to accepting a bunch of stuff later
 impl Parser {
     pub fn new(tokens: Vec<Token>) -> Self {
         Self { tokens, pos: 0 }
     }
 
     //version 5: a program is now zero or more functions one after another up to EOF
+    //version 7: struct declarations can appear at the top level before (or between) functions
     pub fn parse_program(&mut self) -> Result<Program, String> {
+        let mut structs = Vec::new();
         let mut functions = Vec::new();
         while !self.at(TokenKind::Eof) {
-            functions.push(self.parse_function()?);
+            if self.at(TokenKind::StructKw) {
+                structs.push(self.parse_struct_decl()?);
+            } else {
+                functions.push(self.parse_function()?);
+            }
         }
-        Ok(Program { functions })
+        Ok(Program { structs, functions })
+    }
+
+    //version 7: struct Name {stuff inside};
+    fn parse_struct_decl(&mut self) -> Result<StructDecl, String> {
+        self.expect(TokenKind::StructKw)?;
+        let name = self.expect_ident()?;
+        self.expect(TokenKind::LBrace)?;
+
+        let mut fields = Vec::new();
+        while !self.at(TokenKind::RBrace) {
+            let ty = self.parse_type()?;
+            let fname = self.expect_ident()?;
+            self.expect(TokenKind::Semi)?;
+            fields.push(FieldDecl { name: fname, ty });
+        }
+
+        self.expect(TokenKind::RBrace)?;
+        self.expect(TokenKind::Semi)?;
+        Ok(StructDecl { name, fields })
     }
 
     //version 5: int name(params) { body }
@@ -51,12 +78,9 @@ impl Parser {
             return Ok(params); //no parameters
         }
         loop {
-            let ty = self.parse_type()?; // every parameter is typed int
+            let ty = self.parse_type()?; // int, int*, struct Foo, etc
             let name = self.expect_ident()?;
-            params.push(Param{
-                name,
-                ty,
-            });
+            params.push(Param { name, ty });
             if !self.consume(TokenKind::Comma) {
                 break;
             }
@@ -66,7 +90,8 @@ impl Parser {
 
     //version 3: decide which kind of statement we're looking at and parse it
     fn parse_stmt(&mut self) -> Result<Stmt, String> {
-        if self.at(TokenKind::IntKw) {
+        //version 7: struct Name var; is a variable declaration starting with struct
+        if self.at(TokenKind::IntKw) || self.at(TokenKind::StructKw) {
             return self.parse_decl();
         }
 
@@ -151,7 +176,7 @@ impl Parser {
         let init = if self.at(TokenKind::Semi) {
             self.expect(TokenKind::Semi)?;
             None
-        } else if self.at(TokenKind::IntKw) {
+        } else if self.at(TokenKind::IntKw) || self.at(TokenKind::StructKw) { 
             Some(Box::new(self.parse_decl()?))
         } else {
             let expr = self.parse_expr()?;
@@ -185,11 +210,19 @@ impl Parser {
     }
 
     //version 3: parsing a local variable declaration
+    //version 7: also handles int x[N]; and struct Foo x;
     fn parse_decl(&mut self) -> Result<Stmt, String> {
-        //self.expect(TokenKind::IntKw)?;
         //version 6: replacing the above line with a call to parse_type() so we can handle pointers
-        let ty = self.parse_type()?;
+        let mut ty = self.parse_type()?;
         let name = self.expect_ident()?;
+
+        //version 7: if the name is followed by [N] wrap the type in Array
+        //In C the brackets come after the name, not the type keyword
+        if self.consume(TokenKind::LBracket) {
+            let count = self.expect_number()? as usize;
+            self.expect(TokenKind::RBracket)?;
+            ty = Type::Array(Box::new(ty), count);
+        }
 
         let init = if self.consume(TokenKind::Assign) {
             Some(self.parse_expr()?)
@@ -201,8 +234,19 @@ impl Parser {
         Ok(Stmt::Decl(VarDecl { name, ty, init }))
     }
 
-    //version 6L parsing a local variable declaration with type
+    //version 6: parsing a local variable declaration with type
+    //version 7: also handles struct Name types
     fn parse_type(&mut self) -> Result<Type, String> {
+        //version 7: struct Name produces Type::Struct("Name")
+        if self.consume(TokenKind::StructKw) {
+            let name = self.expect_ident()?;
+            let mut ty = Type::Struct(name);
+            while self.consume(TokenKind::Star) {
+                ty = Type::Ptr(Box::new(ty));
+            }
+            return Ok(ty);
+        }
+
         self.expect(TokenKind::IntKw)?;
         let mut ty = Type::Int;
         while self.consume(TokenKind::Star) {
@@ -212,7 +256,7 @@ impl Parser {
     }
 
     //now adding the parsing of different mathematical stuff for version 2
-    fn parse_expr(&mut self) -> Result<Expr, String>{
+    fn parse_expr(&mut self) -> Result<Expr, String> {
         //version 3: assignment sits at the bottom (lowest precedence) of the expression grammar
         self.parse_assign()
     }
@@ -220,7 +264,7 @@ impl Parser {
     //version 3: assignment is lower precedence than math stuff
     //we first parse an ordinary expression; if it's followed by equal sign,
     //the thing we just parsed must be a plain variable name
-    fn parse_assign(&mut self) -> Result<Expr, String>{
+    fn parse_assign(&mut self) -> Result<Expr, String> {
         //version 4: below assignment sits the whole comparison/logical ladder.
         let expr = self.parse_logical_or()?;
 
@@ -236,8 +280,8 @@ impl Parser {
     //next-tighter level and then loops while it sees an operator at its own level,
     //so operators of equal precedence group left to right
     //
-    //   `||`  <  `&&`  <  `== !=`  <  `< <= > >=`  <  `+ -`  <  `* / %`  <  unary
-    fn parse_logical_or(&mut self) -> Result<Expr, String>{
+    //   `||`  <  `&&`  <  `== !=`  <  `< <= > >=`  <  `+ -`  <  `* / %`  <  unary  <  postfix
+    fn parse_logical_or(&mut self) -> Result<Expr, String> {
         let mut expr = self.parse_logical_and()?;
         while self.consume(TokenKind::OrOr) {
             expr = Expr::Logical(
@@ -249,7 +293,7 @@ impl Parser {
         Ok(expr)
     }
 
-    fn parse_logical_and(&mut self) -> Result<Expr, String>{
+    fn parse_logical_and(&mut self) -> Result<Expr, String> {
         let mut expr = self.parse_equality()?;
         while self.consume(TokenKind::AndAnd) {
             expr = Expr::Logical(
@@ -261,7 +305,7 @@ impl Parser {
         Ok(expr)
     }
 
-    fn parse_equality(&mut self) -> Result<Expr, String>{
+    fn parse_equality(&mut self) -> Result<Expr, String> {
         let mut expr = self.parse_relational()?;
         loop {
             let op = if self.consume(TokenKind::EqEq) {
@@ -276,7 +320,7 @@ impl Parser {
         Ok(expr)
     }
 
-    fn parse_relational(&mut self) -> Result<Expr, String>{
+    fn parse_relational(&mut self) -> Result<Expr, String> {
         let mut expr = self.parse_additive()?;
         loop {
             let op = if self.consume(TokenKind::Lt) {
@@ -294,8 +338,9 @@ impl Parser {
         }
         Ok(expr)
     }
+
     // this is for addition and subtraction
-    fn parse_additive(&mut self) -> Result<Expr, String>{
+    fn parse_additive(&mut self) -> Result<Expr, String> {
         let mut expr = self.parse_multiplicative()?;
 
         loop {
@@ -304,88 +349,114 @@ impl Parser {
                     BinaryOp::Add,
                     Box::new(expr),
                     Box::new(self.parse_multiplicative()?),
-            );
-        }     else if self.consume(TokenKind::Minus) {
+                );
+            } else if self.consume(TokenKind::Minus) {
                 expr = Expr::Binary(
                     BinaryOp::Sub,
                     Box::new(expr),
                     Box::new(self.parse_multiplicative()?),
-            );
-        }     else {
+                );
+            } else {
                 break;
+            }
         }
-    }
 
         Ok(expr)
     }
+
     //for multiplication, division, and modulus
-    fn parse_multiplicative(&mut self) -> Result<Expr, String>{
+    fn parse_multiplicative(&mut self) -> Result<Expr, String> {
         let mut expr = self.parse_unary()?;
-        loop{
-            if self.consume(TokenKind::Star){
+        loop {
+            if self.consume(TokenKind::Star) {
                 expr = Expr::Binary(
                     BinaryOp::Mul,
                     Box::new(expr),
                     Box::new(self.parse_unary()?),
-                    );
-            }
-            else if self.consume(TokenKind::Slash){
+                );
+            } else if self.consume(TokenKind::Slash) {
                 expr = Expr::Binary(
                     BinaryOp::Div,
                     Box::new(expr),
                     Box::new(self.parse_unary()?),
-                    );
-            }
-            else if self.consume(TokenKind::Percent){
+                );
+            } else if self.consume(TokenKind::Percent) {
                 expr = Expr::Binary(
                     BinaryOp::Mod,
                     Box::new(expr),
                     Box::new(self.parse_unary()?),
-                    );
-            }
-            else{
+                );
+            } else {
                 break;
             }
         }
         Ok(expr)
-    
     }
+
     //for negative nums
     //version 6: Now for &x and *x, not just -x
-    fn parse_unary(&mut self) -> Result<Expr, String>{
-        if self.consume(TokenKind::Minus){
+    fn parse_unary(&mut self) -> Result<Expr, String> {
+        if self.consume(TokenKind::Minus) {
             return Ok(Expr::Unary(
                 UnaryOp::Neg,
                 Box::new(self.parse_unary()?),
-                ));
+            ));
         }
-        if self.consume(TokenKind::Amp){
+        if self.consume(TokenKind::Amp) {
             return Ok(Expr::Unary(
                 UnaryOp::Addr,
                 Box::new(self.parse_unary()?),
-                ));
+            ));
         }
-        if self.consume(TokenKind::Star){
+        if self.consume(TokenKind::Star) {
             return Ok(Expr::Unary(
                 UnaryOp::Deref,
                 Box::new(self.parse_unary()?),
-                ));
+            ));
         }
-        self.parse_primary()
+        //version 7: postfix operators bind tighter than unary
+        self.parse_postfix()
     }
+
+    //version 7: postfix operators loop after a primary expression
+    fn parse_postfix(&mut self) -> Result<Expr, String> {
+        let mut expr = self.parse_primary()?;
+        loop {
+            if self.consume(TokenKind::LBracket) {
+                let idx = self.parse_expr()?;
+                self.expect(TokenKind::RBracket)?;
+                expr = Expr::Index(Box::new(expr), Box::new(idx));
+            } else if self.consume(TokenKind::Dot) {
+                let field = self.expect_ident()?;
+                expr = Expr::Field(Box::new(expr), field);
+            } else if self.consume(TokenKind::Arrow) {
+                //desugar `p->field` into `(*p).field` so the rest of the compiler
+                //only has to handle the Dot form
+                let field = self.expect_ident()?;
+                expr = Expr::Field(
+                    Box::new(Expr::Unary(UnaryOp::Deref, Box::new(expr))),
+                    field,
+                );
+            } else {
+                break;
+            }
+        }
+        Ok(expr)
+    }
+
     //for numbers and parenthesis
-    fn parse_primary(&mut self) -> Result<Expr, String>{
-        if self.consume(TokenKind::LParen){
+    fn parse_primary(&mut self) -> Result<Expr, String> {
+        if self.consume(TokenKind::LParen) {
             let expr = self.parse_expr()?;
             self.expect(TokenKind::RParen)?;
             return Ok(expr);
         }
-        if self.at(TokenKind::Number){
+        if self.at(TokenKind::Number) {
             return Ok(Expr::Int(self.expect_number()?));
         }
         //version 3: a bare identifier is a variable read, for example `x`
         //version 5: unless it's immediately followed by `(`, which makes it a call
-        if self.at(TokenKind::Ident){
+        if self.at(TokenKind::Ident) {
             let name = self.expect_ident()?;
             if self.consume(TokenKind::LParen) {
                 let args = self.parse_args()?;
