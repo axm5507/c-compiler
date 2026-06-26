@@ -60,7 +60,7 @@ fn gen_function(asm: &mut String, func: &Function, symbols: &SymbolTable, labels
 
     //version 5: copy each incoming argument register into the slot sema assigned to that parameter
     for (i, param) in func.params.iter().enumerate() {
-        let offset = symbols.offsets[param];
+        let offset = symbols.offsets[&param.name];
         asm.push_str(&format!("  mov [rbp-{offset}], {}\n", ARG_REGS[i]));
     }
 
@@ -220,6 +220,21 @@ fn gen_stmt(
     }
 }
 
+//version 6: compute the address of an lvalue into rax (used by Addr and Assign)
+fn gen_addr(asm: &mut String, expr: &Expr, symbols: &SymbolTable, labels: &mut usize, depth: &mut i64) {
+    match expr {
+        Expr::Var(name) => {
+            let offset = symbols.offsets[name];
+            asm.push_str(&format!("  lea rax, [rbp-{offset}]\n"));
+        }
+        // *p is an lvalue: the address is whatever p holds
+        Expr::Unary(UnaryOp::Deref, inner) => {
+            gen_expr(asm, inner, symbols, labels, depth);
+        }
+        _ => panic!("gen_addr called on non-lvalue"),
+    }
+}
+
 //new function that recursively emits assembly for expression trees built by parser
 fn gen_expr(asm: &mut String, expr: &Expr, symbols: &SymbolTable, labels: &mut usize, depth: &mut i64) {
     match expr {
@@ -227,24 +242,37 @@ fn gen_expr(asm: &mut String, expr: &Expr, symbols: &SymbolTable, labels: &mut u
             asm.push_str(&format!("  mov rax, {value}\n"));
         }
 
-        //version 3: read a variable by taking the address of its slot and loading through it
+        //version 3: read a variable by loading through its stack-slot address
         Expr::Var(name) => {
             let offset = symbols.offsets[name];
             asm.push_str(&format!("  lea rax, [rbp-{offset}]\n"));
             asm.push_str("  mov rax, [rax]\n");
         }
 
-        //version 3: evaluate the right hand side into rax, then store it into the variable's slot
-        Expr::Assign(name, value) => {
-            gen_expr(asm, value, symbols, labels, depth);
-            let offset = symbols.offsets[name];
-            asm.push_str(&format!("  mov [rbp-{offset}], rax\n"));
+        //version 6: compute address of lhs, evaluate rhs, store through the address
+        Expr::Assign(lhs, rhs) => {
+            gen_addr(asm, lhs, symbols, labels, depth);
+            push(asm, depth);
+            gen_expr(asm, rhs, symbols, labels, depth);
+            pop(asm, depth, "rdi");
+            asm.push_str("  mov [rdi], rax\n");
         }
 
-        Expr::Unary(UnaryOp::Neg, inner) => {
-            gen_expr(asm, inner, symbols, labels, depth);
-            asm.push_str("  neg rax\n");
-        }
+        Expr::Unary(op, inner) => match op {
+            UnaryOp::Neg => {
+                gen_expr(asm, inner, symbols, labels, depth);
+                asm.push_str("  neg rax\n");
+            }
+            // &x: produce the address of x as a value
+            UnaryOp::Addr => {
+                gen_addr(asm, inner, symbols, labels, depth);
+            }
+            // *p: load through the pointer value
+            UnaryOp::Deref => {
+                gen_expr(asm, inner, symbols, labels, depth);
+                asm.push_str("  mov rax, [rax]\n");
+            }
+        },
 
         Expr::Binary(op, lhs, rhs) => {
             gen_expr(asm, lhs, symbols, labels, depth);

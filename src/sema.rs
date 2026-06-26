@@ -35,9 +35,10 @@ pub struct ProgramLayout {
 }
 
 //version 6: struct for symbol
+#[derive(Clone)]
 pub struct Symbol{
-    offset: i64,
-    ty: Type,
+    pub offset: i64,
+    pub ty: Type,
 }
 
 struct Analyzer<'a> {
@@ -78,7 +79,7 @@ impl<'a> Analyzer<'a> {
     fn resolve(&self, name: &str) -> Result<Symbol, String> {
         for scope in self.scopes.iter().rev() {
             if let Some(sym) = scope.get(name) {
-                return Ok(*sym);
+                return Ok(sym.clone());
             }
         }
         Err(format!("use of undeclared variable '{name}'"))
@@ -93,15 +94,15 @@ impl<'a> Analyzer<'a> {
     }
     fn check_stmt(&mut self, stmt: &Stmt) -> Result<(), String> {
         match stmt {
-            Stmt::Return(expr) => self.check_expr(expr),
-            Stmt::Expr(expr) => self.check_expr(expr),
+            Stmt::Return(expr) => { self.check_expr(expr)?; Ok(()) }
+            Stmt::Expr(expr) => { self.check_expr(expr)?; Ok(()) }
             Stmt::Decl(decl) => {
                 if let Some(init) = &decl.init {
                     let init_ty = self.check_expr(init)?;
                     if init_ty != decl.ty {
                         return Err(format!(
                             "variable '{}' declared as {:?} but initialized with {:?}",
-                            decl.name
+                            decl.name, decl.ty, init_ty
                         ));
                     }
                 }

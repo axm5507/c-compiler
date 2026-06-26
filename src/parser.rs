@@ -1,4 +1,4 @@
-use crate::ast::{BinaryOp, Expr, Function, LogicalOp, Program, Stmt, UnaryOp, VarDecl};
+use crate::ast::{BinaryOp, Expr, Function, LogicalOp, Param, Program, Stmt, Type, UnaryOp, VarDecl};
 use crate::lexer::{Token, TokenKind};
 
 pub struct Parser{
@@ -45,7 +45,7 @@ impl Parser {
     }
 
     //version 5: a comma separated list of int name parameters(could be empty)
-    fn parse_params(&mut self) -> Result<Vec<String>, String> {
+    fn parse_params(&mut self) -> Result<Vec<Param>, String> {
         let mut params = Vec::new();
         if self.at(TokenKind::RParen) {
             return Ok(params); //no parameters
@@ -226,12 +226,7 @@ impl Parser {
 
         if self.consume(TokenKind::Assign) {
             let value = self.parse_assign()?;
-            //if let Expr::Var(name) = expr {
-            //    return Ok(Expr::Assign(name, Box::new(value)));
-            //version 6: changing to include type of variable being assigned to
             return Ok(Expr::Assign(Box::new(expr), Box::new(value)));
-            }
-            return Err(self.error_here("invalid assignment target (left side must be a variable)"));
         }
 
         Ok(expr)
