@@ -13,6 +13,47 @@ Right now, I plan on implementing the following 7 versions:
 6. Pointers, address of, dereferencing
 7. Arrays, indexing, structs, alignment, layout
 
+# How to Run
+
+**Prerequisites:** Rust toolchain (`rustup`/`cargo`). To assemble and execute the output, a C compiler like `gcc` or `clang` that can read `.s` files is required.
+
+**Compile a `.c` file to assembly:**
+```sh
+cargo run -- examples/v7_arrays_structs.c
+```
+This prints x86-64 Intel-syntax assembly to stdout.
+
+**Assemble and run the result (Linux/macOS):**
+```sh
+cargo run -- examples/v7_arrays_structs.c > out.s
+gcc -o out out.s
+./out
+echo $?   # prints the program's return value
+```
+
+**Assemble and run (one-liner):**
+```sh
+cargo run -- examples/v7_arrays_structs.c | gcc -x assembler - -o out && ./out; echo $?
+```
+
+**Run the example files:**
+```
+examples/v4_control_flow.c   – if/else, while, for, comparisons, logical operators
+examples/v5_functions.c      – multiple functions, recursion (Fibonacci, GCD)
+examples/v6_pointers.c       – pointers, address-of, dereference chains
+examples/v7_arrays_structs.c – fixed-size arrays, struct fields, pointer-to-struct (->)
+```
+
+**Build without running:**
+```sh
+cargo build --release          # produces target/release/ecc (or ecc.exe on Windows)
+```
+
+**Clean build artifacts:**
+```sh
+cargo clean
+```
+
 # A few questions I thought of while starting:
 
 **Why this project?**
