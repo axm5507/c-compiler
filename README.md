@@ -1,9 +1,9 @@
 # c-compiler
-In this project, I will be making a c compiler implemented in idiomatic rust. It will contain a handwritten recursive-descent parser and a basic pipeline.
+In this project, I made a c compiler implemented in idiomatic rust. It contains a handwritten recursive-descent parser and a basic pipeline.
 
 Lexer -> Parser -> AST -> Semantic Analysis -> Code Generation -> x86-64 Assembly
 
-Right now, I plan on implementing the following 7 versions:
+Right now, the following 7 versions have been implemented:
 
 1. Bare-bones, just int main() { return 1; }
 2. Arithmetic expressions and PEMDAS
