@@ -18,7 +18,7 @@ All 7 versions are now complete. Current limitations to the compiler that I may 
 
 # How to Run
 
-**Prerequisites:** Rust toolchain ('rustup'/'cargo'). To assemble and execute the output, a C compiler like `gcc` or `clang` that can read `.s` files is required.
+**Prerequisites:** Rust toolchain (`rustup`/`cargo`). To assemble and execute the output, a C compiler like `gcc` or `clang` that can read `.s` files is required.
 
 **Compile a `.c` file to assembly:**
 ```sh
