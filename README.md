@@ -13,9 +13,12 @@ Right now, I plan on implementing the following 7 versions:
 6. Pointers, address of, dereferencing
 7. Arrays, indexing, structs, alignment, layout
 
+**Update**
+All 7 versions are now complete. Current limitations to the compiler that I may work on sometime in the future include the lack of global variables, string literals, no casts, and no sizeof operator. Some other things to add in the future are adding a three address code layer between semantic analysis and codegen to make handling later optimization passes easier, register allocation without spilling, and constant folding.
+
 # How to Run
 
-**Prerequisites:** Rust toolchain (`rustup`/`cargo`). To assemble and execute the output, a C compiler like `gcc` or `clang` that can read `.s` files is required.
+**Prerequisites:** Rust toolchain (rustup/cargo). To assemble and execute the output, a C compiler like `gcc` or `clang` that can read `.s` files is required.
 
 **Compile a `.c` file to assembly:**
 ```sh
@@ -28,7 +31,7 @@ This prints x86-64 Intel-syntax assembly to stdout.
 cargo run -- examples/v7_arrays_structs.c > out.s
 gcc -o out out.s
 ./out
-echo $?   # prints the program's return value
+echo $? 
 ```
 
 **Assemble and run (one-liner):**
@@ -38,15 +41,15 @@ cargo run -- examples/v7_arrays_structs.c | gcc -x assembler - -o out && ./out; 
 
 **Run the example files:**
 ```
-examples/v4_control_flow.c   – if/else, while, for, comparisons, logical operators
-examples/v5_functions.c      – multiple functions, recursion (Fibonacci, GCD)
-examples/v6_pointers.c       – pointers, address-of, dereference chains
-examples/v7_arrays_structs.c – fixed-size arrays, struct fields, pointer-to-struct (->)
+examples/v4_control_flow.c 
+examples/v5_functions.c 
+examples/v6_pointers.c     
+examples/v7_arrays_structs.c 
 ```
 
 **Build without running:**
 ```sh
-cargo build --release          # produces target/release/ecc (or ecc.exe on Windows)
+cargo build --release        
 ```
 
 **Clean build artifacts:**
