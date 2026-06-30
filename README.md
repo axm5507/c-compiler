@@ -3,7 +3,7 @@ In this project, I made a c compiler implemented in idiomatic rust. It contains 
 
 Lexer -> Parser -> AST -> Semantic Analysis -> Code Generation -> x86-64 Assembly
 
-Right now, the following 7 versions have been implemented:
+The following 7 versions have been implemented:
 
 1. Bare-bones, just int main() { return 1; }
 2. Arithmetic expressions and PEMDAS
@@ -13,8 +13,7 @@ Right now, the following 7 versions have been implemented:
 6. Pointers, address of, dereferencing
 7. Arrays, indexing, structs, alignment, layout
 
-**Update**
-All 7 versions are now complete. Current limitations to the compiler that I may work on sometime in the future include the lack of global variables, string literals, no casts, and no sizeof operator. Some other things to add in the future are adding a three address code layer between semantic analysis and codegen to make handling later optimization passes easier, register allocation without spilling, and constant folding.
+Current limitations to the compiler that I may work on sometime in the future include the lack of global variables, string literals, no casts, and no sizeof operator. Other later changes could also contain adding a three address code layer between semantic analysis and codegen to make handling later optimization passes easier, register allocation without spilling, and constant folding.
 
 # How to Run
 
